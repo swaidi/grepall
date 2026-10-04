@@ -1,0 +1,69 @@
+name: Build release
+
+# Runs when a release is published on GitHub, and attaches the Windows and Linux
+# packages to it. It can also be started manually from the Actions tab for a test build.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: Windows
+          - os: ubuntu-22.04   # older base system, so the Linux build runs on more distributions
+            platform: Linux
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create environment (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -m venv .build-venv
+          echo "PY=${{ github.workspace }}\.build-venv\Scripts\python.exe" >> $env:GITHUB_ENV
+
+      - name: Create environment (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-tk
+          python3 -m venv .build-venv
+          echo "PY=${{ github.workspace }}/.build-venv/bin/python" >> "$GITHUB_ENV"
+
+      - name: Install packages
+        run: |
+          ${{ env.PY }} -m pip install --upgrade pip
+          ${{ env.PY }} -m pip install -r requirements.txt pyinstaller pillow
+
+      - name: Build and package
+        run: ${{ env.PY }} build_exe.py --package
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" release/* --clobber
+
+      - name: Keep as test build
+        if: github.event_name != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDF-OCR-${{ matrix.platform }}
+          path: release/*
