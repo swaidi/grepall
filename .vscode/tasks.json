@@ -1,0 +1,73 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "1. Create environment",
+      "type": "process",
+      "command": "python",
+      "args": ["-m", "venv", ".build-venv"],
+      "linux": { "command": "python3" },
+      "osx": { "command": "python3" },
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "2. Install packages",
+      "type": "process",
+      "command": "${workspaceFolder}\\.build-venv\\Scripts\\python.exe",
+      "linux": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "osx": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "args": ["-m", "pip", "install", "-r", "requirements.txt", "pyinstaller", "pillow"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Download language data",
+      "type": "process",
+      "command": "${workspaceFolder}\\.build-venv\\Scripts\\python.exe",
+      "linux": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "osx": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "args": ["build_exe.py", "--data-only"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "3. Test app",
+      "type": "process",
+      "command": "${workspaceFolder}\\.build-venv\\Scripts\\python.exe",
+      "linux": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "osx": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "args": ["pdf_ocr_standalone.py"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": ["Download language data"],
+      "problemMatcher": []
+    },
+    {
+      "label": "4. Build EXE",
+      "type": "process",
+      "command": "${workspaceFolder}\\.build-venv\\Scripts\\python.exe",
+      "linux": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "osx": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "args": ["build_exe.py"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "5. Package release",
+      "type": "process",
+      "command": "${workspaceFolder}\\.build-venv\\Scripts\\python.exe",
+      "linux": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "osx": { "command": "${workspaceFolder}/.build-venv/bin/python" },
+      "args": ["build_exe.py", "--package"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Setup and build (all steps)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["1. Create environment", "2. Install packages", "4. Build EXE"],
+      "problemMatcher": []
+    }
+  ]
+}
