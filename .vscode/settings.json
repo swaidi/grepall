@@ -1,0 +1,3 @@
+{
+  "files.exclude": { "build": true, "release": true, "**/__pycache__": true, "*.spec": true }
+}
