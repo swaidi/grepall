@@ -1,0 +1,18 @@
+# Python environments
+.venv/
+.build-venv/
+
+# Build output
+build/
+dist/
+release/
+*.spec
+__pycache__/
+
+# OCR language data (downloaded automatically by build_exe.py)
+tessdata/
+
+# Temporary files
+*.partial
+*.partial.pdf
+*.part
