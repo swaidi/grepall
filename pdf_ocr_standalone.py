@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# PDF OCR to Markdown
+# GrepAll - Offline OCR for PDFs and images, with Arabic support
 # Copyright (C) 2026 A.T.Grep
 # Licensed under the GNU Affero General Public License v3.0. See LICENSE.
-"""PDF OCR to Markdown - single-file desktop app for Windows and Linux.
+"""GrepAll - single-file desktop app for Windows and Linux.
 
 Creates searchable PDFs (original pages kept unchanged, invisible OCR text layer added)
 and optionally converts them to Markdown.
@@ -13,13 +13,16 @@ installed with Tesseract or placed in a "tessdata" folder next to this script or
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import platform
 import queue
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -37,8 +40,9 @@ except ImportError:
     except ImportError as exc:
         raise SystemExit("PyMuPDF is required: python -m pip install pymupdf") from exc
 
-APP_NAME = "PDF OCR to Markdown"
-APP_VERSION = "1.3.0"
+APP_NAME = "GrepAll"
+APP_TAGLINE = "Offline OCR for PDFs and images, with Arabic support"
+APP_VERSION = "1.4.0"
 APP_CREDIT = "A.T.Grep"
 FEEDBACK_EMAIL = "dev.oasis006@passmail.net"
 ICON_FILE = "app_icon.png"
@@ -56,6 +60,120 @@ RESOLUTIONS = {"Compact (200 dpi)": 200, "Standard (300 dpi)": 300, "Small print
 ARABIC = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
 LTR_CHARS = re.compile(r"[A-Za-z0-9\u0660-\u0669]")
 MD_PREFIX = re.compile(r"^(\s*(?:#{1,6}\s+|[-*+]\s+|>\s+)?)(.*)$")
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
+INPUT_SUFFIXES = (".pdf",) + IMAGE_SUFFIXES
+IMAGE_PAGE_LONG_SIDE = 842  # images are placed on A4-sized pages (842 pt = 297 mm)
+ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫٬٪", "01234567890123456789.,%")
+ARABIC_DIACRITICS = re.compile(r"[\u064B-\u065F\u0670]")
+ALEF_FORMS = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا"})
+TATWEEL = "\u0640"
+
+DEFAULT_SETTINGS = {
+    "language": "Arabic + English",
+    "quality": "Standard (300 dpi)",
+    "output_dir": "",
+    "combine_images": False,
+    "markers": True,
+    "strip_headers": False,
+    "arabic_digits": True,
+    "arabic_tatweel": True,
+    "arabic_diacritics": True,
+    "arabic_alef": True,
+    "window_size": "880x860",
+}
+
+
+def settings_path() -> Path:
+    """Per-user settings file: %APPDATA%\\GrepAll on Windows, ~/.config/grepall on Linux."""
+    return _settings_base() / ("GrepAll" if sys.platform.startswith("win") else "grepall") / "settings.json"
+
+
+def _settings_base() -> Path:
+    if sys.platform.startswith("win"):
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+def _migrate_old_settings() -> None:
+    """Copy settings saved by versions released as "PDF OCR to Markdown", once."""
+    new = settings_path()
+    old = _settings_base() / ("PDF-OCR" if sys.platform.startswith("win") else "pdf-ocr") / "settings.json"
+    if new.exists() or not old.exists():
+        return
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old, new)
+    except OSError:
+        pass
+
+
+def load_settings() -> dict:
+    _migrate_old_settings()
+    settings = dict(DEFAULT_SETTINGS)
+    try:
+        stored = json.loads(settings_path().read_text(encoding="utf-8"))
+    except Exception:
+        return settings
+    for key, default in DEFAULT_SETTINGS.items():
+        value = stored.get(key)
+        if isinstance(value, type(default)):
+            settings[key] = value
+    if settings["language"] not in LANGUAGES:
+        settings["language"] = DEFAULT_SETTINGS["language"]
+    if settings["quality"] not in RESOLUTIONS:
+        settings["quality"] = DEFAULT_SETTINGS["quality"]
+    if not re.fullmatch(r"\d{3,4}x\d{3,4}", settings["window_size"]):
+        settings["window_size"] = DEFAULT_SETTINGS["window_size"]
+    return settings
+
+
+def save_settings(settings: dict) -> None:
+    path = settings_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_name(path.name + ".partial")
+        temp.write_text(json.dumps(settings, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+    except OSError:
+        pass  # settings are a convenience; never block the app
+
+
+def is_image(path: Path) -> bool:
+    return path.suffix.lower() in IMAGE_SUFFIXES
+
+
+def images_to_pdf(images: list[Path], dst: Path) -> int:
+    """Combine image files into one PDF with A4-sized pages. Multi-page TIFFs add one page per frame.
+    JPEG data is kept as is, and phone-photo rotation (EXIF) is respected. Returns the page count."""
+    output = pymupdf.open()
+    try:
+        for image in images:
+            with pymupdf.open(image) as image_doc:
+                pdf_bytes = image_doc.convert_to_pdf()
+            with pymupdf.open("pdf", pdf_bytes) as image_pdf:
+                for index, page in enumerate(image_pdf):
+                    scale = IMAGE_PAGE_LONG_SIDE / max(page.rect.width, page.rect.height)
+                    new_page = output.new_page(width=page.rect.width * scale, height=page.rect.height * scale)
+                    new_page.show_pdf_page(new_page.rect, image_pdf, index)
+        if output.page_count == 0:
+            raise RuntimeError("The image contains no pages.")
+        output.save(dst, garbage=4, deflate=True)
+        return output.page_count
+    finally:
+        output.close()
+
+
+def clean_arabic(text: str, digits: bool, tatweel: bool, diacritics: bool, alef: bool) -> str:
+    """Optional Arabic normalization for the Markdown output."""
+    if digits:
+        text = text.translate(ARABIC_DIGITS)
+    if tatweel:
+        text = text.replace(TATWEEL, "")
+    if diacritics:
+        text = ARABIC_DIACRITICS.sub("", text)
+    if alef:
+        text = text.translate(ALEF_FORMS)
+    return text
 
 
 # =============================================================== engine
@@ -206,7 +324,7 @@ def fix_rtl_line(line: str) -> str:
 
 
 def to_markdown(pdf_path: Path, md_path: Path, title: str, page_numbers: list[int],
-                markers: bool, strip_headers: bool = False) -> str | None:
+                markers: bool, strip_headers: bool = False, cleanup: dict | None = None) -> str | None:
     """Write Markdown. Returns a warning message when the layout engine was not used."""
     texts: list[str] = []
     warning = None
@@ -232,6 +350,8 @@ def to_markdown(pdf_path: Path, md_path: Path, title: str, page_numbers: list[in
                 body = page.get_text("text", sort=True).strip() or "_[no text on this page]_"
             if is_ocr_page(page):
                 body = "\n".join(fix_rtl_line(line) for line in body.splitlines())
+            if cleanup:
+                body = clean_arabic(body, **cleanup)
             number = page_numbers[index] if index < len(page_numbers) else index + 1
             header = f"<!-- Page {number} -->\n\n" if markers else ""
             chunks.append(header + body)
@@ -441,25 +561,33 @@ def system_info() -> str:
 # =============================================================== main window
 class PdfOcrApp(tk.Tk):
     def __init__(self) -> None:
-        super().__init__(className="pdf-ocr")  # Tk reports the window class as "Pdf-ocr" (matches the Linux menu entry)
+        super().__init__(className="grepall")  # Tk reports the window class as "Grepall" (matches the Linux menu entry)
         self.title(f"{APP_NAME} {APP_VERSION}")
-        self.geometry("820x720")
-        self.minsize(680, 620)
+        settings = load_settings()
+        self.geometry(self._fit_to_screen(settings["window_size"]))
+        self.minsize(760, 700)
         self.files: list[Path] = []
-        self.ocr_results: list[tuple[Path, Path, list[int]]] = []
+        # Each result: (title, OCR PDF, original page numbers, input files)
+        self.ocr_results: list[tuple[str, Path, list[int], list[Path]]] = []
         self.messages: queue.Queue = queue.Queue()
         self.cancel = threading.Event()
         self.worker: threading.Thread | None = None
-        self.lang = tk.StringVar(value="Arabic + English")
-        self.dpi = tk.StringVar(value="Standard (300 dpi)")
+        self.lang = tk.StringVar()
+        self.dpi = tk.StringVar()
         self.pages = tk.StringVar()
         self.force = tk.BooleanVar(value=False)
-        self.markers = tk.BooleanVar(value=True)
-        self.strip_headers = tk.BooleanVar(value=False)
-        self.output_dir = tk.StringVar(value="")
-        self.status = tk.StringVar(value="Add PDF files to begin.")
+        self.combine_images = tk.BooleanVar()
+        self.markers = tk.BooleanVar()
+        self.strip_headers = tk.BooleanVar()
+        self.arabic_digits = tk.BooleanVar()
+        self.arabic_tatweel = tk.BooleanVar()
+        self.arabic_diacritics = tk.BooleanVar()
+        self.arabic_alef = tk.BooleanVar()
+        self.output_dir = tk.StringVar()
+        self.status = tk.StringVar(value="Add PDF or image files to begin.")
         self._load_icon()
         self._build()
+        self._apply_settings(settings)
         self._refresh_buttons()
         self.after(100, self._poll)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -477,6 +605,56 @@ class PdfOcrApp(tk.Tk):
         factor = max(1, self.icon_image.height() // 40)  # about 40 px high in the header
         self.header_image = self.icon_image.subsample(factor, factor)
 
+    # ------------------------------------------------------------ settings
+    def _fit_to_screen(self, size: str) -> str:
+        """Keep the window within the screen, leaving room for the taskbar."""
+        width, height = (int(value) for value in size.split("x"))
+        width = min(width, self.winfo_screenwidth() - 40)
+        height = min(height, self.winfo_screenheight() - 90)
+        return f"{max(width, 760)}x{max(height, 700)}"
+
+    def _setting_vars(self) -> dict:
+        return {
+            "language": self.lang, "quality": self.dpi, "output_dir": self.output_dir,
+            "combine_images": self.combine_images, "markers": self.markers,
+            "strip_headers": self.strip_headers, "arabic_digits": self.arabic_digits,
+            "arabic_tatweel": self.arabic_tatweel, "arabic_diacritics": self.arabic_diacritics,
+            "arabic_alef": self.arabic_alef,
+        }
+
+    def _apply_settings(self, settings: dict) -> None:
+        for key, variable in self._setting_vars().items():
+            variable.set(settings[key])
+        folder = settings["output_dir"]
+        if folder and not Path(folder).is_dir():
+            self.output_dir.set("")
+            folder = ""
+        self.output_label.configure(text=folder or "Same folder as each file")
+
+    def _save_settings(self) -> None:
+        settings = {key: variable.get() for key, variable in self._setting_vars().items()}
+        if self.state() == "normal":
+            settings["window_size"] = f"{self.winfo_width()}x{self.winfo_height()}"
+        else:
+            settings["window_size"] = load_settings()["window_size"]
+        save_settings(settings)
+
+    def reset_settings(self) -> None:
+        if not messagebox.askyesno("Reset settings",
+                                   "Restore all options to their default values?", parent=self):
+            return
+        self._apply_settings(DEFAULT_SETTINGS)
+        self.geometry(self._fit_to_screen(DEFAULT_SETTINGS["window_size"]))
+        try:
+            settings_path().unlink()
+        except OSError:
+            pass
+        self._write_log("Settings restored to defaults.")
+
+    def _cleanup_options(self) -> dict:
+        return {"digits": self.arabic_digits.get(), "tatweel": self.arabic_tatweel.get(),
+                "diacritics": self.arabic_diacritics.get(), "alef": self.arabic_alef.get()}
+
     # ------------------------------------------------------------ layout
     def _build(self) -> None:
         padding = {"padx": 12, "pady": 6}
@@ -486,14 +664,17 @@ class PdfOcrApp(tk.Tk):
             ttk.Label(header, image=self.header_image).pack(side="left")
             title_font = tkfont.nametofont("TkDefaultFont").copy()
             title_font.configure(size=14, weight="bold")
-            ttk.Label(header, text=APP_NAME, font=title_font).pack(side="left", padx=10)
+            titles = ttk.Frame(header)
+            titles.pack(side="left", padx=10)
+            ttk.Label(titles, text=APP_NAME, font=title_font).pack(anchor="w")
+            ttk.Label(titles, text=APP_TAGLINE, foreground="#555").pack(anchor="w")
         root = ttk.Frame(self)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
         root.rowconfigure(4, weight=1)
 
-        files = ttk.LabelFrame(root, text="1. PDF files")
+        files = ttk.LabelFrame(root, text="1. Files (PDF or images)")
         files.grid(row=0, column=0, sticky="nsew", **padding)
         files.columnconfigure(0, weight=1)
         files.rowconfigure(0, weight=1)
@@ -529,10 +710,12 @@ class PdfOcrApp(tk.Tk):
         output_controls = ttk.Frame(options)
         output_controls.grid(row=2, column=1, columnspan=3, sticky="ew", pady=4, padx=(0, 8))
         output_controls.columnconfigure(0, weight=1)
-        self.output_label = ttk.Label(output_controls, text="Same folder as each PDF", foreground="#555")
+        self.output_label = ttk.Label(output_controls, text="Same folder as each file", foreground="#555")
         self.output_label.grid(row=0, column=0, sticky="w")
         ttk.Button(output_controls, text="Change...", command=self.choose_output).grid(row=0, column=1, padx=4)
         ttk.Button(output_controls, text="Reset", command=self.reset_output).grid(row=0, column=2)
+        ttk.Checkbutton(options, text="Combine images into one PDF", variable=self.combine_images)\
+            .grid(row=3, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 6))
 
         actions = ttk.LabelFrame(root, text="3. Run")
         actions.grid(row=2, column=0, sticky="ew", **padding)
@@ -549,6 +732,16 @@ class PdfOcrApp(tk.Tk):
         ttk.Checkbutton(markdown_options, text="Page markers in Markdown", variable=self.markers).pack(side="left")
         ttk.Checkbutton(markdown_options, text="Remove repeating headers and footers", variable=self.strip_headers)\
             .pack(side="left", padx=16)
+        arabic = ttk.Frame(actions)
+        arabic.grid(row=2, column=0, columnspan=4, sticky="w", padx=8, pady=(0, 8))
+        ttk.Label(arabic, text="Arabic cleanup (Markdown):").grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 12))
+        for index, (text, variable) in enumerate((
+                ("Convert Arabic-Indic digits to 0-9", self.arabic_digits),
+                ("Remove stretching (tatweel)", self.arabic_tatweel),
+                ("Remove diacritics (tashkeel)", self.arabic_diacritics),
+                ("Unify Alef forms", self.arabic_alef))):
+            ttk.Checkbutton(arabic, text=text, variable=variable)\
+                .grid(row=index // 2, column=1 + index % 2, sticky="w", padx=(0, 16))
 
         progress = ttk.Frame(root)
         progress.grid(row=3, column=0, sticky="ew", padx=12)
@@ -569,39 +762,47 @@ class PdfOcrApp(tk.Tk):
 
         footer = ttk.Frame(root)
         footer.grid(row=5, column=0, sticky="ew", padx=12, pady=(4, 8))
-        footer.columnconfigure(1, weight=1)
+        footer.columnconfigure(2, weight=1)
         ttk.Button(footer, text="Report a bug or suggest an improvement",
                    command=self.open_feedback).grid(row=0, column=0, sticky="w")
-        ttk.Label(footer, text=APP_CREDIT, foreground="#777").grid(row=0, column=2, sticky="e")
+        ttk.Button(footer, text="Reset settings", command=self.reset_settings).grid(row=0, column=1, sticky="w", padx=8)
+        ttk.Label(footer, text=APP_CREDIT, foreground="#777").grid(row=0, column=3, sticky="e")
 
     # ------------------------------------------------------------ file list
     def _sync_list(self) -> None:
         self.listbox.delete(0, "end")
         for path in self.files:
             self.listbox.insert("end", str(path))
-        self.ocr_results = [result for result in self.ocr_results if result[0] in self.files]
+        self.ocr_results = [result for result in self.ocr_results if any(item in self.files for item in result[3])]
         if not self._busy():
             count = len(self.files)
-            self.status.set(f"{count} file{'s' if count != 1 else ''} selected." if count else "Add PDF files to begin.")
+            self.status.set(f"{count} file{'s' if count != 1 else ''} selected." if count
+                            else "Add PDF or image files to begin.")
         self._refresh_buttons()
 
     def add_files(self) -> None:
-        selected = filedialog.askopenfilenames(title="Select PDF files", filetypes=[("PDF files", "*.pdf")])
+        def patterns(suffixes) -> str:  # Linux file dialogs are case-sensitive
+            return " ".join(f"*{suffix} *{suffix.upper()}" for suffix in suffixes)
+        selected = filedialog.askopenfilenames(title="Select PDF or image files", filetypes=[
+            ("PDF and image files", patterns(INPUT_SUFFIXES)),
+            ("PDF files", patterns((".pdf",))),
+            ("Image files", patterns(IMAGE_SUFFIXES)),
+            ("All files", "*")])
         self._add_files([Path(path) for path in selected])
 
     def add_folder(self) -> None:
-        folder = filedialog.askdirectory(title="Select a folder of PDF files")
+        folder = filedialog.askdirectory(title="Select a folder of PDF or image files")
         if folder:
             found = sorted(path for path in Path(folder).iterdir()
-                           if path.is_file() and path.suffix.lower() == ".pdf"
+                           if path.is_file() and path.suffix.lower() in INPUT_SUFFIXES
                            and not path.stem.endswith(("_ocr", ".partial")))
             if not found:
-                messagebox.showinfo("No PDFs found", "The selected folder contains no PDF files.")
+                messagebox.showinfo("No files found", "The selected folder contains no PDF or image files.")
             self._add_files(found)
 
     def _add_files(self, paths: list[Path]) -> None:
         for path in paths:
-            if path.suffix.lower() == ".pdf" and path not in self.files:
+            if path.suffix.lower() in INPUT_SUFFIXES and path not in self.files:
                 self.files.append(path)
         self._sync_list()
 
@@ -623,7 +824,7 @@ class PdfOcrApp(tk.Tk):
 
     def reset_output(self) -> None:
         self.output_dir.set("")
-        self.output_label.configure(text="Same folder as each PDF")
+        self.output_label.configure(text="Same folder as each file")
 
     def open_output(self) -> None:
         target = Path(self.output_dir.get()) if self.output_dir.get() else (self.files[0].parent if self.files else None)
@@ -692,6 +893,7 @@ class PdfOcrApp(tk.Tk):
         if self._busy() and not messagebox.askyesno("Work in progress", "Processing is still running. Stop and close?"):
             return
         self.cancel.set()
+        self._save_settings()
         self.destroy()
 
     def _start(self, target) -> None:
@@ -701,6 +903,42 @@ class PdfOcrApp(tk.Tk):
         self._refresh_buttons()
 
     # ------------------------------------------------------------ OCR
+    def _plan_jobs(self) -> list[tuple[str, list[Path], Path]] | None:
+        """Build (title, inputs, destination) jobs. Returns None if the user cancels."""
+        output_dir = self.output_dir.get()
+        jobs: list[tuple[str, list[Path], Path]] = []
+        used: set[Path] = set()
+
+        def destination_for(source: Path, base_name: str) -> Path:
+            folder = Path(output_dir) if output_dir else source.parent
+            candidate = folder / f"{base_name}_ocr.pdf"
+            if candidate in used:  # e.g. report.pdf and report.jpg in the same run
+                candidate = folder / f"{base_name}_{source.suffix.lstrip('.').lower()}_ocr.pdf"
+            used.add(candidate)
+            return candidate
+
+        images = [path for path in self.files if is_image(path)]
+        combine = self.combine_images.get() and len(images) >= 2
+        for path in self.files:
+            if combine and is_image(path):
+                continue
+            destination = destination_for(path, path.stem)
+            jobs.append((destination.stem[:-4], [path], destination))
+        if combine:
+            initial_dir = output_dir or str(images[0].parent)
+            chosen = filedialog.asksaveasfilename(
+                title="Save the combined images as", initialdir=initial_dir,
+                initialfile="combined_images_ocr.pdf", defaultextension=".pdf",
+                filetypes=[("PDF files", "*.pdf")], parent=self)
+            if not chosen:
+                return None
+            destination = Path(chosen)
+            if destination.suffix.lower() != ".pdf":
+                destination = destination.with_suffix(".pdf")
+            title = destination.stem[:-4] if destination.stem.endswith("_ocr") else destination.stem
+            jobs.append((title, images, destination))
+        return jobs
+
     def run_ocr(self) -> None:
         lang = LANGUAGES[self.lang.get()]
         page_spec = self.pages.get().strip() or None
@@ -716,25 +954,33 @@ class PdfOcrApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Tesseract not ready", str(exc))
             return
+        jobs = self._plan_jobs()
+        if jobs is None:
+            return
+        self._save_settings()
         self.ocr_results.clear()
         self._write_log(f"--- OCR started ({self.lang.get()}, {self.dpi.get()}) ---")
-        files, output_dir = list(self.files), self.output_dir.get()
         dpi, force = RESOLUTIONS[self.dpi.get()], self.force.get()
-        self._start(lambda: self._ocr_worker(files, output_dir, lang, tessdata, dpi, page_spec, force))
+        self._start(lambda: self._ocr_worker(jobs, lang, tessdata, dpi, page_spec, force))
 
-    def _ocr_worker(self, files: list[Path], output_dir: str, lang: str, tessdata: str, dpi: int,
+    def _ocr_worker(self, jobs: list[tuple[str, list[Path], Path]], lang: str, tessdata: str, dpi: int,
                     page_spec: str | None, force: bool) -> None:
         put = self.messages.put
         completed = 0
-        for file_index, source in enumerate(files, 1):
+        for job_index, (title, inputs, destination) in enumerate(jobs, 1):
             if self.cancel.is_set():
                 break
-            destination_dir = Path(output_dir) if output_dir else source.parent
-            destination = destination_dir / f"{source.stem}_ocr.pdf"
-            put(("log", str(source)))
+            label = str(inputs[0]) if len(inputs) == 1 else f"{len(inputs)} images combined into {destination.name}"
+            put(("log", label))
             started = time.time()
+            temp_dir = None
             try:
-                destination_dir.mkdir(parents=True, exist_ok=True)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                source = inputs[0]
+                if is_image(source):
+                    temp_dir = Path(tempfile.mkdtemp(prefix="grepall-"))
+                    source = temp_dir / "images.pdf"
+                    images_to_pdf(inputs, source)
                 with pymupdf.open(source) as probe:
                     page_count = probe.page_count
                 try:
@@ -745,7 +991,7 @@ class PdfOcrApp(tk.Tk):
 
                 def progress(current: int, total: int, page_number: int, status: str) -> None:
                     put(("bar", (current, total)))
-                    put(("status", f"File {file_index} of {len(files)}: {source.name}, "
+                    put(("status", f"File {job_index} of {len(jobs)}: {destination.name}, "
                                    f"page {page_number} ({current} of {total})"))
                     if "large page" in status:
                         put(("log", f"  Page {page_number}: {status}"))
@@ -753,7 +999,7 @@ class PdfOcrApp(tk.Tk):
                         raise Cancelled()
 
                 ocr_count, copied_count = ocr_pdf(source, destination, pages, lang, dpi, tessdata, force, progress)
-                put(("result", (source, destination, [page + 1 for page in pages])))
+                put(("result", (title, destination, [page + 1 for page in pages], inputs)))
                 completed += 1
                 put(("log", f"  Saved {destination.name}: {ocr_count} OCR, {copied_count} copied, "
                             f"{time.time() - started:.0f}s"))
@@ -762,10 +1008,13 @@ class PdfOcrApp(tk.Tk):
                 break
             except Exception as exc:
                 put(("log", f"  Failed: {exc}"))
+            finally:
+                if temp_dir:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
         if self.cancel.is_set():
             result = f"Stopped. {completed} file(s) saved."
         else:
-            result = f"OCR finished: {completed} of {len(files)} file(s) saved."
+            result = f"OCR finished: {completed} of {len(jobs)} file(s) saved."
         if completed:
             result += " Select Convert to Markdown to continue."
         put(("log", result))
@@ -773,28 +1022,31 @@ class PdfOcrApp(tk.Tk):
 
     # ------------------------------------------------------------ Markdown
     def run_markdown(self) -> None:
+        self._save_settings()
         self._write_log("--- Markdown conversion started ---")
         results, markers, strip = list(self.ocr_results), self.markers.get(), self.strip_headers.get()
-        self._start(lambda: self._markdown_worker(results, markers, strip))
+        cleanup = self._cleanup_options()
+        self._start(lambda: self._markdown_worker(results, markers, strip, cleanup))
 
-    def _markdown_worker(self, results: list[tuple[Path, Path, list[int]]], markers: bool,
-                         strip_headers: bool) -> None:
+    def _markdown_worker(self, results: list[tuple[str, Path, list[int], list[Path]]], markers: bool,
+                         strip_headers: bool, cleanup: dict) -> None:
         put = self.messages.put
         completed = 0
-        for index, (source, destination, page_numbers) in enumerate(results, 1):
+        for index, (title, destination, page_numbers, _inputs) in enumerate(results, 1):
             if self.cancel.is_set():
                 break
-            markdown_path = destination.with_name(f"{source.stem}.md")
-            put(("status", f"Converting {source.name} ({index} of {len(results)})"))
+            markdown_path = destination.with_name(f"{title}.md")
+            put(("status", f"Converting {destination.name} ({index} of {len(results)})"))
             put(("bar", (index - 1, len(results))))
             try:
-                warning = to_markdown(destination, markdown_path, source.stem, page_numbers, markers, strip_headers)
+                warning = to_markdown(destination, markdown_path, title, page_numbers, markers,
+                                      strip_headers, cleanup)
                 if warning:
                     put(("log", f"  Note: {warning}"))
                 completed += 1
                 put(("log", f"  Saved {markdown_path.name}"))
             except Exception as exc:
-                put(("log", f"  Failed {source.name}: {exc}"))
+                put(("log", f"  Failed {destination.name}: {exc}"))
             put(("bar", (index, len(results))))
         if self.cancel.is_set():
             result = f"Stopped. {completed} Markdown file(s) saved."
@@ -802,7 +1054,6 @@ class PdfOcrApp(tk.Tk):
             result = f"Markdown finished: {completed} of {len(results)} file(s) saved."
         put(("log", result))
         put(("done", result))
-
 
 def main() -> None:
     # A windowed .exe has no console: give print() somewhere harmless to write.

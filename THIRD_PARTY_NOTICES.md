@@ -1,7 +1,7 @@
 # Third-Party Notices
 
-PDF OCR to Markdown is licensed under the GNU Affero General Public License v3.0 (see `LICENSE`).
-The distributed `PDF-OCR.exe` bundles the following third-party components, each under its own license.
+GrepAll is licensed under the GNU Affero General Public License v3.0 (see `LICENSE`).
+The distributed GrepAll app (`GrepAll.exe` on Windows, `GrepAll` on Linux) bundles the following third-party components, each under its own license.
 
 ## Main Components
 

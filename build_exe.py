@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-# PDF OCR to Markdown
+# GrepAll - Offline OCR for PDFs and images, with Arabic support
 # Copyright (C) 2026 A.T.Grep
 # Licensed under the GNU Affero General Public License v3.0. See LICENSE.
 """
-build_exe.py - Builds PDF OCR to Markdown on Windows or Linux.
+build_exe.py - Builds GrepAll on Windows or Linux.
 
 Usage (with the project's virtual environment Python):
     python build_exe.py              Download language data (if missing) and build the app
     python build_exe.py --data-only  Download language data only (needed to run from source)
     python build_exe.py --package    Build, then create a ready-to-share release archive
 
-Output:
-    Windows: dist/PDF-OCR.exe    and  release/PDF-OCR-v<version>-Windows.zip
-    Linux:   dist/PDF-OCR        and  release/PDF-OCR-v<version>-Linux.tar.gz
+Output (a folder build, which starts much faster than a single-file build):
+    Windows: dist/GrepAll/GrepAll.exe  and  release/GrepAll-v<version>-Windows.zip
+    Linux:   dist/GrepAll/GrepAll      and  release/GrepAll-v<version>-Linux.tar.gz
+The app needs the whole dist/GrepAll folder, including its _internal subfolder.
 """
 
 from __future__ import annotations
@@ -30,14 +31,15 @@ ROOT = Path(__file__).resolve().parent
 TESSDATA = ROOT / "tessdata"
 LANGS = ["eng", "ara"]
 APP_SCRIPT = "pdf_ocr_standalone.py"
-APP_NAME = "PDF-OCR"
+APP_NAME = "GrepAll"
 ICON = "app_icon.png"
 DATA_URL = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/{}.traineddata"
 # Used in the release guide when not building on GitHub; GitHub builds fill in the real link.
-SOURCE_URL = "https://github.com/<your-username>/pdf-ocr-to-markdown"
+SOURCE_URL = "https://github.com/swaidi/grepall"
 IS_WINDOWS = os.name == "nt"
 PLATFORM = "Windows" if IS_WINDOWS else "Linux"
-EXECUTABLE = ROOT / "dist" / (f"{APP_NAME}.exe" if IS_WINDOWS else APP_NAME)
+APP_FOLDER = ROOT / "dist" / APP_NAME
+EXECUTABLE = APP_FOLDER / (f"{APP_NAME}.exe" if IS_WINDOWS else APP_NAME)
 
 
 def step(message: str) -> None:
@@ -91,7 +93,7 @@ def build() -> None:
     separator = ";" if IS_WINDOWS else ":"
     command = [
         sys.executable, "-m", "PyInstaller",
-        "--noconfirm", "--clean", "--onefile", "--windowed",
+        "--noconfirm", "--clean", "--onedir", "--windowed",
         "--name", APP_NAME,
         "--add-data", f"tessdata{separator}tessdata",
         "--collect-all", "pymupdf",
@@ -126,9 +128,9 @@ def package() -> Path:
     release_dir = ROOT / "release"
     staging = release_dir / name
     shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True)
+    release_dir.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy2(EXECUTABLE, staging / EXECUTABLE.name)
+    shutil.copytree(APP_FOLDER, staging, symlinks=True)  # app plus its _internal folder
     for document in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
         if (ROOT / document).exists():
             shutil.copy2(ROOT / document, staging / document)
@@ -158,7 +160,7 @@ def package() -> Path:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build PDF OCR to Markdown.")
+    parser = argparse.ArgumentParser(description="Build GrepAll.")
     parser.add_argument("--data-only", action="store_true", help="Download the OCR language data only")
     parser.add_argument("--package", action="store_true", help="Build, then create a release archive")
     args = parser.parse_args()

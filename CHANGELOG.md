@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.4.0 (2026-10-05)
+
+### Changed name
+- The app is now named **GrepAll**, with the tagline "Offline OCR for PDFs and images, with Arabic support." It was previously released as "PDF OCR to Markdown." Saved settings are carried over automatically, and the Linux installer replaces the previous installation.
+
+### Added
+- Images as input: JPG, PNG, TIFF (including multi-page TIFF), and BMP. Phone photos are turned upright automatically and placed on A4-sized pages.
+- "Combine images into one PDF" option, for documents photographed page by page.
+- Arabic cleanup options for the Markdown output: convert Arabic-Indic digits, remove tatweel, remove diacritics, and unify Alef forms.
+- Remembered settings: language, scan quality, output folder, Markdown and Arabic cleanup options, and window size are restored at each start. A "Reset settings" button restores the defaults.
+
+### Changed
+- The app is distributed as a folder instead of a single file, so it starts in about a second instead of several seconds. Keep `GrepAll.exe` (or `GrepAll` on Linux) together with its `_internal` folder.
+- The Linux installer keeps a copy of itself for uninstalling, so the extracted folder can be deleted after installation.
+
 ## 1.3.0 (2026-10-04)
 
 ### Added

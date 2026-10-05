@@ -1,18 +1,19 @@
 <p align="center">
-  <img src="app_icon.png" alt="PDF OCR to Markdown icon" width="96">
+  <img src="app_icon.png" alt="GrepAll icon" width="96">
 </p>
 
-<h1 align="center">PDF OCR to Markdown</h1>
+<h1 align="center">GrepAll</h1>
 
 <p align="center">
-  A desktop app for Windows and Linux that turns scanned PDFs into searchable PDFs and clean Markdown files, fully offline.
+  <b>Offline OCR for PDFs and images, with Arabic support</b><br>
+  A desktop app for Windows and Linux that turns scanned PDFs and document photos into searchable PDFs and clean Markdown files.
 </p>
 
 ---
 
 ## Overview
 
-PDF OCR to Markdown reads scanned or image-based PDF files, recognizes the text with Tesseract OCR, and saves:
+GrepAll reads scanned PDF files and document photos, recognizes the text with Tesseract OCR, and saves:
 
 - **A searchable PDF:** the original pages, unchanged, with an invisible text layer added. The file stays close to the original size.
 - **A Markdown file (optional):** structured text with headings and lists, ready to use with AI assistants such as Claude, or in documentation tools.
@@ -21,8 +22,11 @@ All processing runs locally on your computer. No document is uploaded anywhere.
 
 ## Features
 
-- Runs on **Windows** and **Linux**, as a single portable app with no installation, no Python, and no admin rights required.
+- Runs on **Windows** and **Linux** as a portable app that starts in about a second, with no installation, no Python, and no admin rights required.
 - Arabic and English text recognition, including mixed-language pages, with correct Arabic word order in the Markdown output.
+- **PDFs and images as input:** JPG, PNG, TIFF (including multi-page TIFF), and BMP. Phone photos are turned upright automatically, and images can be combined into one PDF.
+- **Arabic cleanup** for the Markdown output: Arabic-Indic digits to 0-9, tatweel and diacritics removal, and unified Alef forms.
+- **Remembered settings** between sessions, with a one-click reset.
 - Batch processing of individual files or whole folders.
 - Page range selection, for example `1-5, 9`.
 - Automatic skipping of pages that already contain text.
@@ -37,43 +41,45 @@ Open the **[Releases](../../releases)** page and download the package for your s
 
 | System | Package |
 |---|---|
-| Windows 10 or 11 (64-bit) | `PDF-OCR-v<version>-Windows.zip` |
-| Linux (64-bit) | `PDF-OCR-v<version>-Linux.tar.gz` |
+| Windows 10 or 11 (64-bit) | `GrepAll-v<version>-Windows.zip` |
+| Linux (64-bit) | `GrepAll-v<version>-Linux.tar.gz` |
 
 ### Windows
 
-1. Extract the ZIP file.
-2. Double-click `PDF-OCR.exe`.
+1. Extract the ZIP file to a permanent location, such as your Documents folder.
+2. Open the extracted folder and double-click `GrepAll.exe`.
+
+Keep `GrepAll.exe` together with the `_internal` folder next to it. To start the app from the desktop, create a shortcut: right-click `GrepAll.exe` > **Show more options** > **Send to** > **Desktop (create shortcut)**.
 
 If Windows SmartScreen shows "Windows protected your PC," select **More info**, then **Run anyway**.
 
 ### Linux
 
 ```bash
-tar -xzf PDF-OCR-v<version>-Linux.tar.gz
-cd PDF-OCR-v<version>-Linux
+tar -xzf GrepAll-v<version>-Linux.tar.gz
+cd GrepAll-v<version>-Linux
 ./install_linux.sh
 ```
 
-The installer adds **PDF OCR to Markdown** to your applications menu and the `pdf-ocr` command, for the current user only (no `sudo`). To run the app without installing, use `./PDF-OCR`. To remove it, run `./install_linux.sh --uninstall`.
+The installer adds **GrepAll** to your applications menu and the `grepall` command, for the current user only (no `sudo`). The extracted folder can be deleted afterward. To run the app without installing, use `./GrepAll` inside the extracted folder. To remove it, run `bash ~/.local/share/grepall/install_linux.sh --uninstall`.
 
 The Linux build runs on Ubuntu 22.04, Linux Mint 21, Debian 12, Fedora 38, and newer distributions with a desktop environment.
 
 ## Usage
 
-1. Select **Add files…** or **Add folder…**, and choose your PDFs.
-2. Adjust the options if needed: document language, scan quality, page range, and output folder.
+1. Select **Add files…** or **Add folder…**, and choose your PDFs or images.
+2. Adjust the options if needed: document language, scan quality, page range, output folder, and **Combine images into one PDF**.
 3. Select **Run OCR**.
-4. When OCR finishes, select **Convert to Markdown** if you need the `.md` files.
+4. When OCR finishes, select **Convert to Markdown** if you need the `.md` files. The Arabic cleanup options apply to the Markdown only; the searchable PDF keeps the text as recognized.
 
-Outputs are saved next to each original PDF unless you choose another folder:
+Outputs are saved next to each original file unless you choose another folder:
 
 | Output | Description |
 |---|---|
 | `<name>_ocr.pdf` | Searchable PDF |
 | `<name>.md` | Markdown text |
 
-The app unpacks itself each time it starts, so the window may take several seconds to appear.
+Settings are stored per user in `%APPDATA%\GrepAll\settings.json` (Windows) or `~/.config/grepall/settings.json` (Linux).
 
 ## Build from Source
 
@@ -96,7 +102,7 @@ On other distributions, install Python 3.10 or later with its `venv` and Tkinter
    | `1. Create environment` | Creates the `.build-venv` Python environment |
    | `2. Install packages` | Installs the dependencies |
    | `3. Test app` | Downloads the OCR language data if needed, then runs the app from source |
-   | `4. Build EXE` | Builds `dist/PDF-OCR.exe` (Windows) or `dist/PDF-OCR` (Linux) |
+   | `4. Build EXE` | Builds the app folder `dist/GrepAll/`, with `GrepAll.exe` (Windows) or `GrepAll` (Linux) inside |
    | `5. Package release` | Builds and creates a ready-to-share archive in `release/` |
 
 Each system builds only its own version. To build both, use the GitHub workflow below, or run the tasks on each system.
@@ -147,6 +153,7 @@ python3 -m venv .build-venv
 ## Known Limitations
 
 - Tables in scanned pages are converted as text rows, not as Markdown tables.
+- WEBP and HEIC images are not supported. Convert them to JPG or PNG first.
 - OCR accuracy depends on scan quality. Handwriting, stamps, and signatures are recognized poorly.
 - Arabic file names may display with reversed letter order in the app window on Linux. Processing is not affected.
 - Languages other than Arabic and English require additional language data and a code change.
