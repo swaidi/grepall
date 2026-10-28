@@ -13,27 +13,33 @@
 
 ## Overview
 
-GrepAll reads scanned PDF files and document photos, recognizes the text with Tesseract OCR, and saves:
+GrepAll is an offline toolkit for scanned documents and document photos. It has four independent tools and a search library, so you can start with any of them:
 
-- **A searchable PDF:** the original pages, unchanged, with an invisible text layer added. The file stays close to the original size.
-- **A Markdown file (optional):** structured text with headings and lists, ready to use with AI assistants such as Claude, or in documentation tools.
+| Tool | What it does | Output |
+|---|---|---|
+| **Make searchable (OCR)** | Adds an invisible text layer; pages stay unchanged | `<name>_ocr.pdf` |
+| **Convert to Markdown** | Text for AI assistants such as Claude, from PDFs, images, Word, Excel and PowerPoint files; scanned pages are read automatically | `<name>.md` |
+| **Reduce file size** | Recompresses images; text stays sharp and searchable | `<name>_small.pdf` |
+| **Tables to Excel** | Copies ruled tables (such as BOQs) into Excel, with real numbers | `<name>_tables.xlsx` |
+| **Search documents** | Finds words and reference numbers across all processed documents | Offline library |
 
 All processing runs locally on your computer. No document is uploaded anywhere.
 
 ## Features
 
-- Runs on **Windows** and **Linux** as a portable app that starts in about a second, with no installation, no Python, and no admin rights required.
-- Arabic and English text recognition, including mixed-language pages, with correct Arabic word order in the Markdown output.
-- **PDFs and images as input:** JPG, PNG, TIFF (including multi-page TIFF), and BMP. Phone photos are turned upright automatically, and images can be combined into one PDF.
-- **Arabic cleanup** for the Markdown output: Arabic-Indic digits to 0-9, tatweel and diacritics removal, and unified Alef forms.
-- **Remembered settings** between sessions, with a one-click reset.
-- Batch processing of individual files or whole folders.
-- Page range selection, for example `1-5, 9`.
-- Automatic skipping of pages that already contain text.
-- Three scan-quality levels: Compact (200 dpi), Standard (300 dpi), and Small print (400 dpi).
-- Safe handling of large-format drawings (A0/A1) through automatic resolution limits.
-- Optional page markers and header/footer removal in the Markdown output.
-- Built-in form to report a bug or suggest an improvement.
+- Runs on **Windows** and **Linux**, with a Windows installer that needs no admin rights. Starts in about a second.
+- Modern sidebar layout with a **dark theme** (default) and a light theme.
+- Arabic and English text recognition, including mixed-language pages, with correct Arabic word order.
+- **Sideways and upside-down scans** are detected, made searchable, and turned upright.
+- **PDFs and images as input:** JPG, PNG, TIFF (including multi-page TIFF), and BMP. Images can be combined into one document.
+- **Word, Excel and PowerPoint to Markdown** (`.docx`, `.xlsx`, `.xlsm`, `.pptx`): headings, automatic clause numbering (1.2, (a), iv), lists, bold and italic text, and tables from Word; one table per sheet from Excel, with calculated formula values and number formats; one section per slide from PowerPoint, including tables and speaker notes. These files can also be added to the library.
+- **Reduce file size** with three levels (Lossless, Balanced, Smallest) and optional grayscale. A file is saved only if it really gets smaller.
+- **Tables to Excel** for digital and scanned tables with grid lines; one sheet per table, amounts stored as numbers, right-to-left sheets for Arabic tables.
+- **Searchable document library:** Arabic-aware search (letter forms, diacritics, and digit styles are matched either way), exact phrases in quotes, open results directly, and clean-up of moved or deleted files.
+- **Arabic cleanup** for Markdown: Arabic-Indic digits to 0-9, tatweel and diacritics removal, unified Alef forms.
+- **Sensitive data hiding:** Saudi ID/Iqama numbers, IBANs, phone numbers, emails, card numbers, your own words, and the values after labels you choose (such as "Ref" or "Dated"), with an optional redacted PDF copy in which they are permanently removed.
+- Remembered settings, an optional update notice (only the version number is checked), and a built-in feedback form.
+- Batch processing, page ranges, three scan-quality levels, and safe handling of large drawings (A0/A1).
 
 ## Download
 
@@ -41,17 +47,22 @@ Open the **[Releases](../../releases)** page and download the package for your s
 
 | System | Package |
 |---|---|
-| Windows 10 or 11 (64-bit) | `GrepAll-v<version>-Windows.zip` |
+| Windows 10 or 11 (64-bit), **recommended** | `GrepAll-v<version>-Windows-Setup.exe` |
+| Windows 10 or 11 (64-bit), portable | `GrepAll-v<version>-Windows.zip` |
 | Linux (64-bit) | `GrepAll-v<version>-Linux.tar.gz` |
 
-### Windows
+### Windows Installer (Recommended)
+
+Run `GrepAll-v<version>-Windows-Setup.exe`. It installs GrepAll for the current user without administrator rights, adds it to the Start menu, and offers a desktop shortcut. Running a newer setup updates the app and keeps your settings. To remove it, use **Settings > Apps > Installed apps > GrepAll > Uninstall**.
+
+### Windows Portable
 
 1. Extract the ZIP file to a permanent location, such as your Documents folder.
 2. Open the extracted folder and double-click `GrepAll.exe`.
 
-Keep `GrepAll.exe` together with the `_internal` folder next to it. To start the app from the desktop, create a shortcut: right-click `GrepAll.exe` > **Show more options** > **Send to** > **Desktop (create shortcut)**.
+> **Important:** `GrepAll.exe` only works next to its `_internal` folder. Copying the .exe alone elsewhere causes the error "Failed to load Python DLL." To start it from the desktop, create a shortcut instead: right-click `GrepAll.exe` > **Show more options** > **Send to** > **Desktop (create shortcut)**.
 
-If Windows SmartScreen shows "Windows protected your PC," select **More info**, then **Run anyway**.
+If Windows SmartScreen shows "Windows protected your PC," select **More info**, then **Run anyway**. The app is not digitally signed.
 
 ### Linux
 
@@ -67,19 +78,17 @@ The Linux build runs on Ubuntu 22.04, Linux Mint 21, Debian 12, Fedora 38, and n
 
 ## Usage
 
-1. Select **Add files…** or **Add folder…**, and choose your PDFs or images.
-2. Adjust the options if needed: document language, scan quality, page range, output folder, and **Combine images into one PDF**.
-3. Select **Run OCR**.
-4. When OCR finishes, select **Convert to Markdown** if you need the `.md` files. The Arabic cleanup options apply to the Markdown only; the searchable PDF keeps the text as recognized.
+1. Pick a tool in the sidebar.
+2. Select **Add files…** or **Add folder…**. The file list is shared by all tools, so you can switch tools freely.
+3. Adjust the tool's options and select the blue button. Results appear in the **Results** table; double-click a row to open the file.
 
-Outputs are saved next to each original file unless you choose another folder:
+Outputs are saved next to each original file unless you choose another folder with **Change…**.
 
-| Output | Description |
-|---|---|
-| `<name>_ocr.pdf` | Searchable PDF |
-| `<name>.md` | Markdown text |
+**Sensitive data (Convert to Markdown):** Select **Hide in Markdown**. Hidden items appear as `[ID]`, `[IBAN]`, `[PHONE]`, `[EMAIL]`, `[CARD]`, or `[REDACTED]`. Use **Hide these words** for names, and **Hide the value after** for labeled values: with `Ref, Dated`, the line `Ref: HMG-DAM-MEP-TEN-01 Dated: 08/10/2026` becomes `Ref: [REDACTED] Dated: [REDACTED]`. A hidden value must contain a digit. With **Also create a redacted PDF copy**, `<name>_redacted.pdf` is saved with black boxes; the hidden text and image areas are permanently removed from that copy. Automatic detection can miss items, so review redacted files before sharing them.
 
-Settings are stored per user in `%APPDATA%\GrepAll\settings.json` (Windows) or `~/.config/grepall/settings.json` (Linux).
+**Library:** Documents processed with **Make searchable** or **Convert to Markdown** are added automatically (optional). **Add documents…** adds existing files. All search words must appear on the same page; use quotes for an exact phrase.
+
+Settings and the library are stored per user in `%APPDATA%\GrepAll\` (Windows) or `~/.config/grepall/` (Linux): `settings.json` and `library.db`.
 
 ## Build from Source
 
@@ -125,13 +134,15 @@ python3 -m venv .build-venv
 .build-venv/bin/python build_exe.py --package
 ```
 
+On Windows, `--package` also builds the installer if [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (free; a per-user installation works). Without it, the installer step is skipped and the portable ZIP is still created.
+
 `build_exe.py` downloads the OCR language data (`eng`, `ara`) during the first build. If the download is blocked, download `eng.traineddata` and `ara.traineddata` from [tessdata_best](https://github.com/tesseract-ocr/tessdata_best) in a browser and save them in a `tessdata` folder in the project.
 
 ### Automatic Builds on GitHub
 
 `.github/workflows/release.yml` builds both versions on GitHub:
 
-- **Publishing a release** builds the Windows and Linux packages and attaches them to that release automatically.
+- **Publishing a release** builds the Windows installer, the Windows portable ZIP, and the Linux package, and attaches them to that release automatically.
 - **Running the workflow manually** (Actions tab > **Build release** > **Run workflow**) creates test builds, available under the run's **Artifacts**.
 
 ### Project Structure
@@ -142,6 +153,7 @@ python3 -m venv .build-venv
 ├── app_icon.png                    App icon
 ├── build_exe.py                    Build and packaging script
 ├── install_linux.sh                Linux menu installer (included in the Linux package)
+├── installer.iss                   Windows installer definition (Inno Setup)
 ├── pdf_ocr_standalone.py           Application source code
 ├── READ_ME_FIRST.txt               User guide (included in the release packages)
 ├── requirements.txt                Python dependencies
@@ -152,10 +164,12 @@ python3 -m venv .build-venv
 
 ## Known Limitations
 
-- Tables in scanned pages are converted as text rows, not as Markdown tables.
+- Tables to Excel needs tables drawn with grid lines. In scanned Arabic tables, Arabic-Indic digits and single small digits are often misread; check the numbers.
+- The library opens a document but cannot jump to the page; the page number is shown instead.
+- Older Office formats (`.doc`, `.xls`, `.ppt`) are not supported; save them as `.docx`, `.xlsx` or `.pptx` first. Images, text boxes, headers and footers inside Word files are not converted. Excel formulas show the result last saved by Excel; files created by other programs may have no saved results. Hidden Excel sheets are skipped, and each sheet is limited to 20,000 rows.
 - WEBP and HEIC images are not supported. Convert them to JPG or PNG first.
 - OCR accuracy depends on scan quality. Handwriting, stamps, and signatures are recognized poorly.
-- Arabic file names may display with reversed letter order in the app window on Linux. Processing is not affected.
+- Arabic file names and search excerpts may display with reversed letter order in the app window on Linux. Processing and search are not affected.
 - Languages other than Arabic and English require additional language data and a code change.
 
 ## Contributing

@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.6.0 (2026-10-28)
+
+### Added
+- **Independent tools:** Make searchable, Convert to Markdown, Reduce file size, and Tables to Excel each work on their own, in any order. Markdown no longer requires running OCR first; scanned pages are read automatically.
+- **Reduce file size:** Lossless, Balanced, and Smallest levels, optional grayscale, before/after sizes; nothing is saved if a file cannot be made smaller.
+- **Tables to Excel:** Ruled tables from digital and scanned documents, one sheet per table, amounts stored as numbers, right-to-left sheets for Arabic tables.
+- **Searchable document library:** Offline, Arabic-aware search across processed documents, with automatic adding, "Add documents…", open document or folder, and clean-up of missing files.
+- **Sideways page fix:** Pages scanned sideways or upside down are detected, made searchable, and shown upright.
+- **Word, Excel and PowerPoint to Markdown:** `.docx` (headings, automatic clause numbering, lists, bold/italic, tables), `.xlsx`/`.xlsm` (one table per sheet, calculated values, number formats, warning when formula results are missing), and `.pptx` (one section per slide, tables, speaker notes). Sensitive data hiding, Arabic cleanup and the library work with these files too.
+- Visible progress next to the run button: a moving bar from the first click, percentage, file count, elapsed time, and "Finished in m:ss" at the end.
+- "Hide the value after" for sensitive data, e.g. the reference number after "Ref" and the date after "Dated".
+
+### Changed
+- New design matching GrepMail and SysHealth: top bar, sidebar navigation, shared file list, Results table, collapsible Activity log, and status bar.
+- Dark theme is the default; a light theme is one click away.
+- Feedback, update check, and project link moved to "About & feedback"; options remembered as before.
+
+## 1.5.0 (2026-10-10)
+
+### Added
+- **Windows installer:** `GrepAll-v1.5.0-Windows-Setup.exe` installs GrepAll for the current user without administrator rights, adds it to the Start menu, offers a desktop shortcut, keeps settings when updating, and can be removed from Settings > Apps. The portable ZIP remains available.
+- **Sensitive data hiding:** Optional hiding of Saudi ID/Iqama numbers, IBANs, phone numbers, email addresses, card numbers, custom words, and the values after chosen labels (for example the reference number after "Ref" and the date after "Dated") in the Markdown output, with an optional redacted PDF copy in which the hidden text and image areas are permanently removed.
+- **Update notice:** A once-a-day check for a newer release on GitHub, shown as a bar with a Download button. Only the version number is requested. It can be turned off under Options.
+
+### Changed
+- Searchable PDFs no longer keep a hidden full-page copy of the scan inside the text layer, which also makes redaction reliable.
+- The portable Windows guide warns more clearly that `GrepAll.exe` must stay next to its `_internal` folder.
+
+### Fixed
+- The file list buttons stay fully visible when the window is short.
+
 ## 1.4.0 (2026-10-05)
 
 ### Changed name

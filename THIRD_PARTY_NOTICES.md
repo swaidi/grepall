@@ -28,12 +28,21 @@ The distributed GrepAll app (`GrepAll.exe` on Windows, `GrepAll` on Linux) bundl
 | psutil | BSD 3-Clause |
 | tabulate | MIT License |
 | PyYAML | MIT License |
+| [openpyxl](https://openpyxl.readthedocs.io/) | MIT License (writes the Excel files) |
+| et_xmlfile | MIT License |
+| [python-docx](https://github.com/python-openxml/python-docx) | MIT License (reads Word files) |
+| [python-pptx](https://github.com/scanny/python-pptx) | MIT License (reads PowerPoint files) |
+| [lxml](https://lxml.de/) (includes libxml2 and libxslt) | BSD 3-Clause (libxml2 and libxslt: MIT License) |
+| Pillow | MIT-CMU License |
+| XlsxWriter | BSD 2-Clause |
+| typing_extensions | Python Software Foundation License |
 
 ## Build Tools (Not Distributed as Libraries)
 
 | Tool | License |
 |---|---|
 | [PyInstaller](https://pyinstaller.org/) | GPL v2 or later, with an exception that permits distributing the built application under any license |
-| [Pillow](https://python-pillow.org/) | MIT-CMU License (used only to convert the icon at build time) |
+| [Pillow](https://python-pillow.org/) | MIT-CMU License (converts the icon at build time; also used at run time by python-pptx) |
+| [Inno Setup](https://jrsoftware.org/isinfo.php) | Inno Setup License (permissive); builds the Windows installer, whose setup program is part of `GrepAll-…-Windows-Setup.exe` |
 
 The full license texts are available from each project's website or repository.
