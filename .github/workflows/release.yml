@@ -26,8 +26,7 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v5
 
-      - name: Set up Python (Windows)
-        if: runner.os == 'Windows'
+      - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -42,8 +41,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-venv python3-tk
-          python3 -m venv .build-venv
+          sudo apt-get install -y python3-tk   # Tk libraries for the window
+          python -m venv .build-venv
           echo "PY=${{ github.workspace }}/.build-venv/bin/python" >> "$GITHUB_ENV"
 
       - name: Install packages
@@ -63,7 +62,7 @@ jobs:
 
       - name: Keep as test build
         if: github.event_name != 'release'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: GrepAll-${{ matrix.platform }}
           path: release/*
