@@ -2436,7 +2436,7 @@ PALETTES = {
              "on_accent": "#ffffff", "nav_active": "#3b4252", "nav_hover": "#323947",
              "button": "#434c5e", "button_hover": "#4c566a",
              "ok": "#6ccb5f", "warn": "#f2c94c", "fail": "#ff8f99", "log_bg": "#272c36", "log_fg": "#e5e9f0",
-             "row_alt": "#353c4a"},
+             "row_alt": "#353c4a", "group": "#333a48"},
     # Light theme, as in GrepMail
     "light": {"window": "#f8f9fa", "card": "#ffffff", "sidebar": "#ffffff", "topbar": "#ffffff",
               "text": "#212529", "muted": "#6c757d", "border": "#e0e0e0", "input": "#ffffff",
@@ -2444,7 +2444,7 @@ PALETTES = {
               "on_accent": "#ffffff", "nav_active": "#e8eef7", "nav_hover": "#f1f4f9",
               "button": "#eef1f5", "button_hover": "#e2e7ee",
               "ok": "#198754", "warn": "#c05c00", "fail": "#dc3545", "log_bg": "#f1f5f9", "log_fg": "#212529",
-              "row_alt": "#f6f8fb"},
+              "row_alt": "#f6f8fb", "group": "#eaf0f8"},
 }
 
 PAGES = [
@@ -2528,7 +2528,7 @@ class PdfOcrApp(tk.Tk):
         size = 10
         self.fonts = {
             "body": (family, size), "small": (family, size - 1), "bold": (family, size, "bold"),
-            "title": (family, 15, "bold"), "brand": (family, 13, "bold"), "group": (family, 8, "bold"),
+            "title": (family, 15, "bold"), "brand": (family, 13, "bold"), "group": (family, 9 if is_rtl() else 8, "bold"),
             "nav": (family, size), "mono": tkfont.nametofont("TkFixedFont"),
         }
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
@@ -2561,7 +2561,8 @@ class PdfOcrApp(tk.Tk):
 
     def _role_options(self, role: str) -> dict:
         p = self.palette
-        surface = {"window": p["window"], "card": p["card"], "sidebar": p["sidebar"], "topbar": p["topbar"]}
+        surface = {"window": p["window"], "card": p["card"], "sidebar": p["sidebar"], "topbar": p["topbar"],
+                   "group": p["group"]}
         if role in surface:
             return {"bg": surface[role]}
         if role == "line":
@@ -2764,8 +2765,9 @@ class PdfOcrApp(tk.Tk):
         for g, key, label, *_ in PAGES:
             if g != group:
                 group = g
-                self.skin(tk.Label(side, text=tr(g), font=self.fonts["group"], anchor=W), "muted@sidebar").pack(
-                    fill="x", padx=18, pady=(16, 4))
+                # Section headings sit on a slightly different band so they stand apart from the pages
+                self.skin(tk.Label(side, text=tr(g), font=self.fonts["group"], anchor=W, padx=18, pady=5),
+                          "accent@group").pack(fill="x", pady=(14, 4))
             row = self.skin(tk.Frame(side), "sidebar")
             row.pack(fill="x")
             marker = tk.Frame(row, width=3)
