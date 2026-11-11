@@ -2751,7 +2751,11 @@ class PdfOcrApp(tk.Tk):
         body.pack(fill="both", expand=True)
 
         # Sidebar
-        side = self.skin(tk.Frame(body, width=210), "sidebar")
+        # Wide enough for the longest label in the current language and screen scaling (never narrower than 210)
+        nav_font, group_font = tkfont.Font(self, font=self.fonts["nav"]), tkfont.Font(self, font=self.fonts["group"])
+        needed = max([nav_font.measure(vis(tr(label))) + 15 * 2 + 3 for _, _, label, *_ in PAGES] +
+                     [group_font.measure(vis(tr(g))) + 18 * 2 for g, *_ in PAGES])
+        side = self.skin(tk.Frame(body, width=max(210, needed + 16)), "sidebar")
         side.pack(side=LEFT, fill="y")
         side.pack_propagate(False)
         self.skin(tk.Frame(body, width=1), "line").pack(side=LEFT, fill="y")
