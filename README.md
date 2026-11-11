@@ -29,16 +29,17 @@ All processing runs locally on your computer. No document is uploaded anywhere.
 
 - Runs on **Windows** and **Linux**, with a Windows installer that needs no admin rights. Starts in about a second.
 - Modern sidebar layout with a **dark theme** (default) and a light theme.
+- **Arabic or English interface**, switched with one click. The Arabic interface is fully right-to-left (mirrored layout). On first start, GrepAll follows the computer's display language.
 - Arabic and English text recognition, including mixed-language pages, with correct Arabic word order.
 - **Sideways and upside-down scans** are detected, made searchable, and turned upright.
 - **PDFs and images as input:** JPG, PNG, TIFF (including multi-page TIFF), and BMP. Images can be combined into one document.
 - **Word, Excel and PowerPoint to Markdown** (`.docx`, `.xlsx`, `.xlsm`, `.pptx`): headings, automatic clause numbering (1.2, (a), iv), lists, bold and italic text, and tables from Word; one table per sheet from Excel, with calculated formula values and number formats; one section per slide from PowerPoint, including tables and speaker notes. These files can also be added to the library.
-- **Reduce file size** with three levels (Lossless, Balanced, Smallest) and optional grayscale. A file is saved only if it really gets smaller.
+- **Reduce file size** with three levels (Lossless, Balanced, Smallest) and optional grayscale. **"At least 50% smaller"** (on by default) tries stronger settings until the file is half its size, while keeping scans readable (never below 120 dpi for colour, 200 dpi for black and white). Black-and-white scans, such as signed contracts, are stored in the compact fax format. When 50% is not possible, the Results table says why (for example, a file made of vector drawings). A file is saved only if it really gets smaller.
 - **Tables to Excel** for digital and scanned tables with grid lines; one sheet per table, amounts stored as numbers, right-to-left sheets for Arabic tables.
 - **Searchable document library:** Arabic-aware search (letter forms, diacritics, and digit styles are matched either way), exact phrases in quotes, open results directly, and clean-up of moved or deleted files.
 - **Arabic cleanup** for Markdown: Arabic-Indic digits to 0-9, tatweel and diacritics removal, unified Alef forms.
 - **Sensitive data hiding:** Saudi ID/Iqama numbers, IBANs, phone numbers, emails, card numbers, your own words, and the values after labels you choose (such as "Ref" or "Dated"), with an optional redacted PDF copy in which they are permanently removed.
-- Remembered settings, an optional update notice (only the version number is checked), and a built-in feedback form.
+- Remembered settings, an optional update notice (only the version number is checked) with **"Update now"**, which downloads, verifies and installs the new version from GitHub, and a built-in feedback form.
 - Batch processing, page ranges, three scan-quality levels, and safe handling of large drawings (A0/A1).
 
 ## Download
@@ -169,7 +170,9 @@ On Windows, `--package` also builds the installer if [Inno Setup 6](https://jrso
 - Older Office formats (`.doc`, `.xls`, `.ppt`) are not supported; save them as `.docx`, `.xlsx` or `.pptx` first. Images, text boxes, headers and footers inside Word files are not converted. Excel formulas show the result last saved by Excel; files created by other programs may have no saved results. Hidden Excel sheets are skipped, and each sheet is limited to 20,000 rows.
 - WEBP and HEIC images are not supported. Convert them to JPG or PNG first.
 - OCR accuracy depends on scan quality. Handwriting, stamps, and signatures are recognized poorly.
-- Arabic file names and search excerpts may display with reversed letter order in the app window on Linux. Processing and search are not affected.
+- On Linux, Arabic typed into text boxes (search, redaction words) may display with reversed letters while typing. Searching and processing are not affected.
+- On Windows, if Arabic interface text appears reversed or with separated letters, choose another "Arabic text display" method under Settings.
+- Reduce file size cannot halve PDFs made mostly of vector drawings (CAD exports) or text; the Results table explains when this is the case. Digitally signed PDFs lose their signature in the smaller copy; keep the original for official use.
 - Languages other than Arabic and English require additional language data and a code change.
 
 ## Contributing

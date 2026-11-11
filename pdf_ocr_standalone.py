@@ -13,6 +13,7 @@ installed with Tesseract or placed in a "tessdata" folder next to this script or
 """
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
@@ -44,7 +45,7 @@ except ImportError:
 
 APP_NAME = "GrepAll"
 APP_TAGLINE = "Offline OCR for PDFs and images, with Arabic support"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 APP_CREDIT = "A.T.Grep"
 FEEDBACK_EMAIL = "dev.oasis006@passmail.net"
 REPOSITORY = "swaidi/grepall"
@@ -97,10 +98,530 @@ DEFAULT_SETTINGS = {
     "save_searchable": False,
     "reduce_level": "Balanced",
     "reduce_gray": False,
+    "reduce_target": True,
+    "ui_language": "auto",
+    "arabic_display": "embed",
     "library_auto": True,
     "last_page": "ocr",
     "log_open": False,
     "window_geometry": "1180x800",
+}
+
+
+# =============================================================== interface language (English / Arabic)
+WINDOWS = sys.platform.startswith("win")
+UI_LANGUAGES = {"en": "English", "ar": "العربية"}
+# How Arabic text is handed to Tk on Windows ("embed" is the default; the others are fallbacks in Settings).
+# Linux Tk neither joins Arabic letters nor orders them right to left, so text is always prepared there.
+ARABIC_DISPLAY_MODES = ("embed", "visual", "plain")
+_ui = {"lang": "en", "mode": "embed"}
+LEFT, RIGHT, W, E, NW, JUSTIFY = "left", "right", "w", "e", "nw", "left"
+
+
+def system_ui_language() -> str:
+    """'ar' when the computer's display language is Arabic, otherwise 'en'."""
+    try:
+        if WINDOWS:
+            import ctypes
+            return "ar" if ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF == 0x01 else "en"
+        for name in ("LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"):
+            value = os.environ.get(name, "")
+            if value:
+                return "ar" if value.lower().startswith("ar") else "en"
+    except Exception:
+        pass
+    return "en"
+
+
+def set_ui_language(lang: str, mode: str = "embed") -> None:
+    global LEFT, RIGHT, W, E, NW, JUSTIFY
+    _ui["lang"] = lang if lang in UI_LANGUAGES else "en"
+    _ui["mode"] = mode if mode in ARABIC_DISPLAY_MODES else "embed"
+    if _ui["lang"] == "ar":
+        LEFT, RIGHT, W, E, NW, JUSTIFY = "right", "left", "e", "w", "ne", "right"
+    else:
+        LEFT, RIGHT, W, E, NW, JUSTIFY = "left", "right", "w", "e", "nw", "left"
+
+
+def is_rtl() -> bool:
+    return _ui["lang"] == "ar"
+
+
+def PX(start: int, end: int) -> tuple[int, int]:  # noqa: N802 - padding on the leading and trailing side
+    return (end, start) if is_rtl() else (start, end)
+
+
+def grid_col(column: int, span: int = 1, columns: int = 1) -> int:
+    """Grid column for a layout of `columns` columns, mirrored for right-to-left."""
+    return columns - column - span if is_rtl() else column
+
+
+LRI, PDI = "\u2066", "\u2069"  # left-to-right isolate: keeps paths and file names intact in Arabic sentences
+BIDI_CONTROLS = re.compile("[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def ltr(text: str) -> str:
+    """Keep a left-to-right fragment (sizes, file names) in its own order inside Arabic text."""
+    return LRI + text + PDI if is_rtl() else text
+
+
+def tr(text: str, **values) -> str:
+    """Translate an interface text (English is the key) and fill in {placeholders}."""
+    if _ui["lang"] == "ar":
+        text = AR.get(text, text)
+        values = {key: (LRI + str(value) + PDI
+                        if isinstance(value, (str, Path)) and not ARABIC.search(str(value)) and LTR_CHARS.search(str(value))
+                        else value) for key, value in values.items()}
+    return text.format(**values) if values else text
+
+
+def vis(text):
+    """Prepare text containing Arabic for display by Tk (applied automatically to widget texts)."""
+    if not isinstance(text, str) or not ARABIC.search(text):
+        return text
+    mode = _ui["mode"] if WINDOWS else "visual"
+    if WINDOWS and mode == "plain":
+        return text
+    # Embeddings (LRE/PDF) are understood by every Windows version and by python-bidi's mirroring algorithm.
+    lines = text.replace(LRI, "\u202a").replace(PDI, "\u202c").split("\n")
+    if WINDOWS and mode == "embed":
+        # Right-to-left embedding: Windows joins and orders the letters itself.
+        start = "‫" if is_rtl() or not LTR_CHARS.search(text[:1] or "") else "‪"
+        return "\n".join(start + line + "‬" if line else line for line in lines)
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display  # mirrors brackets; supports embeddings (not isolates)
+    except ImportError:
+        return text
+    base = "R" if is_rtl() else None
+    shown = []
+    for line in lines:
+        try:
+            line = get_display(arabic_reshaper.reshape(line), base_dir=base) if line else line
+        except Exception:
+            pass
+        line = BIDI_CONTROLS.sub("", line)  # already in display order; Linux fonts may draw these as boxes
+        shown.append("‭" + line + "‬" if WINDOWS and line else line)
+    return "\n".join(shown)
+
+
+_TEXT_OPTIONS = ("text", "message", "detail", "label")
+
+
+def _vis_options(options):
+    if not options:
+        return options
+    options = dict(options)
+    for key in _TEXT_OPTIONS:
+        for name in (key, "-" + key):
+            if isinstance(options.get(name), str):
+                options[name] = vis(options[name])
+    for name in ("values", "-values"):
+        value = options.get(name)
+        if isinstance(value, (list, tuple)):
+            options[name] = type(value)(vis(item) if isinstance(item, str) else item for item in value)
+    return options
+
+
+def _wrap_logical(widget, options):
+    """Linux (and the Windows "visual" fallback) shows Arabic in display order, so Tk's own wrapping would put
+    the end of a sentence on the first line. Wrapped labels are therefore split into lines here, in reading
+    order, before the lines are prepared for display."""
+    if not options or (WINDOWS and _ui["mode"] != "visual"):
+        return options
+    text = options.get("text", options.get("-text"))
+    if not isinstance(text, str) or not ARABIC.search(text):
+        return options
+    def current(name: str):
+        """An option of an existing widget (None while the widget is being created)."""
+        try:
+            return widget.cget(name)
+        except Exception:
+            return None
+    try:
+        wrap = options.get("wraplength", options.get("-wraplength"))
+        wrap = int(str(wrap if wrap is not None else current("wraplength") or 0) or 0)
+        if wrap <= 0:
+            return options
+        font = options.get("font") or current("font") or ""
+        if not str(font):
+            style = options.get("style") or current("style") or ""
+            default = "TLabel" if isinstance(widget, ttk.Widget) else "Label"
+            font = ttk.Style(widget.master).lookup(str(style) or default, "font") or "TkDefaultFont"
+        root = widget.master
+        if isinstance(font, str) and " " not in font and not font.startswith("{"):
+            measure = tkfont.nametofont(font, root=root).measure
+        else:
+            measure = tkfont.Font(root, font=font).measure
+    except Exception:
+        return options
+    lines = []
+    for paragraph in text.split("\n"):
+        current = ""
+        for word in paragraph.split(" "):
+            candidate = f"{current} {word}" if current else word
+            if current and measure(vis(candidate)) > wrap * 0.97:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        lines.append(current)
+    options = dict(options)
+    options["text"] = "\n".join(lines)
+    options.pop("-text", None)
+    return options
+
+
+def install_text_hooks() -> None:
+    """Route every widget text through vis(), so Arabic shows correctly on Windows and Linux."""
+    import tkinter.ttk as ttk_module
+    if getattr(tk.Misc, "_grepall_hooked", False):
+        return
+    original_options = tk.Misc._options
+    original_format = ttk_module._format_optdict
+
+    def _options(self, cnf, kw=None):
+        if isinstance(cnf, dict):
+            cnf = _vis_options(_wrap_logical(self, cnf))
+        return original_options(self, cnf, _vis_options(_wrap_logical(self, kw)))
+
+    def _format_optdict(optdict, script=False, ignore=None):
+        return original_format(_vis_options(optdict), script, ignore)
+
+    tk.Misc._options = _options
+    ttk_module._format_optdict = _format_optdict
+    tk.Misc._grepall_hooked = True
+
+
+class VisVar(tk.StringVar):
+    """A StringVar for labels (textvariable=...) whose text is prepared like widget texts."""
+
+    def __init__(self, master=None, value=None, name=None) -> None:
+        super().__init__(master, vis(value) if value is not None else value, name)
+
+    def set(self, value) -> None:
+        super().set(vis(value))
+
+
+# Arabic interface texts (English text is the key). Product and format names stay in English.
+AR = {
+    "Update now": "التحديث الآن",
+    "Release page": "صفحة الإصدار",
+    "Update": "التحديث",
+    "Update GrepAll": "تحديث GrepAll",
+    "The update can start when the current work finishes.": "يمكن بدء التحديث بعد انتهاء العمل الجاري.",
+    "Download GrepAll {version} ({size}) and install it now?": "هل تريد تنزيل GrepAll {version} ({size}) وتثبيته الآن؟",
+    "GrepAll closes during the installation. Your settings and library are kept.":
+        "سيُغلق GrepAll أثناء التثبيت، مع الاحتفاظ بإعداداتك ومكتبتك.",
+    "Downloading update…": "جارٍ تنزيل التحديث…",
+    "Downloading update: {percent}%": "جارٍ تنزيل التحديث: {percent}%",
+    "Installing the update…": "جارٍ تثبيت التحديث…",
+    "The update could not be completed: {error}": "تعذر إكمال التحديث: {error}",
+    "You can download it from the release page instead.": "يمكنك تنزيله من صفحة الإصدار بدلا من ذلك.",
+    "; ": "؛ ",
+    "Word: {paragraphs} paragraph(s), {tables} table(s)": "Word: عدد الفقرات {paragraphs}، وعدد الجداول {tables}",
+    "Excel: {sheets} sheet(s), {rows} row(s)": "Excel: عدد الأوراق {sheets}، وعدد الصفوف {rows}",
+    ", {count} hidden sheet(s) skipped": "، وتم تخطي {count} ورقة مخفية",
+    "{count} formula result(s) missing (the file was not saved by Excel: open it in Excel, save it, and convert again)":
+        "نتائج {count} معادلة غير موجودة (لم يُحفظ الملف ببرنامج Excel: افتحه في Excel واحفظه ثم حوّله مرة أخرى)",
+    "PowerPoint: {slides} slide(s)": "PowerPoint: عدد الشرائح {slides}",
+    # Sidebar and pages
+    "TOOLS": "الأدوات",
+    "LIBRARY": "المكتبة",
+    "APP": "التطبيق",
+    "Make searchable": "جعل الملف قابلًا للبحث",
+    "Make searchable (OCR)": "جعل الملف قابلًا للبحث (OCR)",
+    "Adds an invisible text layer so you can search, select and copy text. Pages stay as they are.":
+        "يضيف طبقة نص غير مرئية لتتمكن من البحث في النص وتحديده ونسخه، مع بقاء الصفحات كما هي.",
+    "Convert to Markdown": "التحويل إلى Markdown",
+    "Turns PDFs, images, Word, Excel and PowerPoint files into Markdown for AI assistants. "
+    "Scanned pages are read automatically.":
+        "يحوّل ملفات PDF والصور وملفات Word وExcel وPowerPoint إلى نص Markdown لاستخدامه مع أدوات الذكاء "
+        "الاصطناعي، وتُقرأ الصفحات الممسوحة ضوئيًا تلقائيًا.",
+    "Reduce file size": "تقليل حجم الملف",
+    "Makes PDFs smaller by compressing images. A file is only saved if it really gets smaller.":
+        "يقلل حجم ملفات PDF بضغط الصور، ولا يُحفظ الملف إلا إذا أصبح أصغر فعلًا.",
+    "Tables to Excel": "الجداول إلى Excel",
+    "Copies ruled tables (with grid lines), such as BOQs, into Excel with numbers you can calculate with.":
+        "ينسخ الجداول المخططة بخطوط، مثل جداول الكميات، إلى Excel بأرقام قابلة للحساب.",
+    "Search documents": "البحث في المستندات",
+    "Find any word or reference number across every document in your library, offline.":
+        "ابحث عن أي كلمة أو رقم مرجعي في جميع مستندات مكتبتك دون اتصال بالإنترنت.",
+    "Settings": "الإعدادات",
+    "Appearance, updates and library options.": "المظهر والتحديثات وخيارات المكتبة.",
+    "About & feedback": "حول التطبيق والملاحظات",
+    "Version, license and how to report a problem.": "الإصدار والترخيص وطريقة الإبلاغ عن مشكلة.",
+    "Reduce size": "تقليل الحجم",
+    "Extract tables": "استخراج الجداول",
+    "Redacted copy": "نسخة محجوبة",
+    "Markdown": "Markdown",
+    "Offline OCR for PDFs and images, with Arabic support":
+        "التعرف الضوئي على النصوص دون إنترنت لملفات PDF والصور، مع دعم العربية",
+    # Top bar and status
+    "Light": "فاتح",
+    "Dark": "داكن",
+    "Ready": "جاهز",
+    "Working": "قيد العمل",
+    "Working…": "قيد العمل",
+    "Stopping": "جارٍ الإيقاف",
+    "Starting…": "جارٍ البدء",
+    "Preparing…": "جارٍ التحضير",
+    "Saving": "جارٍ الحفظ",
+    "Stopping after the current page…": "سيتوقف العمل بعد الصفحة الحالية",
+    "Finished in {time}": "اكتمل خلال {time}",
+    "Stopped after {time}": "توقف بعد {time}",
+    "File {number} of {total}": "الملف {number} من {total}",
+    # Files card
+    "Files": "الملفات",
+    "Clear": "مسح",
+    "Remove": "إزالة",
+    "Add folder…": "إضافة مجلد",
+    "Add files…": "إضافة ملفات",
+    "Name": "الاسم",
+    "Pages": "الصفحات",
+    "Size": "الحجم",
+    "Folder": "المجلد",
+    "1 file": "ملف واحد",
+    "{count} files": "عدد الملفات {count}",
+    "PDFs, images, Word, Excel or PowerPoint files": "ملفات PDF أو صور أو ملفات Word أو Excel أو PowerPoint",
+    "missing": "غير موجود",
+    "image": "صورة",
+    "Word": "Word",
+    "Excel": "Excel",
+    "PowerPoint": "PowerPoint",
+    "Save results to:": "حفظ النتائج في",
+    "the same folder as each file": "نفس مجلد كل ملف",
+    "Same folder": "نفس المجلد",
+    "Change…": "تغيير",
+    "Combine images into one document": "دمج الصور في مستند واحد",
+    "Select files": "اختر الملفات",
+    "All supported files": "جميع الملفات المدعومة",
+    "PDF files": "ملفات PDF",
+    "Image files": "ملفات الصور",
+    "Word, Excel and PowerPoint files": "ملفات Word وExcel وPowerPoint",
+    "All files": "جميع الملفات",
+    "Select a folder of documents": "اختر مجلد المستندات",
+    "No files found": "لم يتم العثور على ملفات",
+    "The selected folder contains no supported files.": "لا يحتوي المجلد المحدد على ملفات مدعومة.",
+    "Select the output folder": "اختر مجلد الحفظ",
+    "Cannot open folder": "تعذر فتح المجلد",
+    "Name for the combined images": "اسم ملف الصور المدمجة",
+    # Common options
+    "Options": "الخيارات",
+    "Document language": "لغة المستند",
+    "Arabic + English": "العربية والإنجليزية",
+    "English": "الإنجليزية",
+    "Arabic": "العربية",
+    "Scan quality": "جودة القراءة",
+    "Compact (200 dpi)": "مضغوطة (200 نقطة/بوصة)",
+    "Standard (300 dpi)": "قياسية (300 نقطة/بوصة)",
+    "Small print (400 dpi)": "للخط الصغير (400 نقطة/بوصة)",
+    "blank = all, e.g. 1-5, 9": "اتركه فارغًا لكل الصفحات، مثل 1-5, 9",
+    # Make searchable
+    "Also read pages that already contain text": "قراءة الصفحات التي تحتوي على نص أيضًا",
+    "Turn sideways and upside-down pages upright": "تعديل اتجاه الصفحات المائلة والمقلوبة",
+    "Output: <name>_ocr.pdf, the same pages with searchable text.":
+        "الناتج ملف ‎<name>_ocr.pdf‎ بنفس الصفحات مع نص قابل للبحث.",
+    # Markdown
+    "Page markers": "علامات الصفحات",
+    "Remove repeating headers and footers": "إزالة الترويسات والتذييلات المتكررة",
+    "Also save the searchable PDF": "حفظ نسخة PDF قابلة للبحث أيضًا",
+    "Arabic cleanup:": "تنقيح العربية",
+    "Digits to 0-9": "تحويل الأرقام إلى 0-9",
+    "Remove tatweel": "إزالة التطويل",
+    "Remove diacritics": "إزالة التشكيل",
+    "Unify Alef forms": "توحيد أشكال الألف",
+    "Sensitive data:": "البيانات الحساسة",
+    "Hide in Markdown": "إخفاء في ملف Markdown",
+    "Also create a redacted PDF copy": "إنشاء نسخة PDF محجوبة أيضًا",
+    "Hide these words:": "إخفاء هذه الكلمات",
+    "Hide the value after:": "إخفاء القيمة بعد",
+    "Always hides ID/Iqama, IBAN, phone, email and card numbers. Separate entries with commas. "
+    "Example: value after \"Ref, Dated\" hides the reference number and the date.":
+        "تُخفى دائمًا أرقام الهوية والإقامة والآيبان والهاتف والبريد الإلكتروني والبطاقات. افصل بين المدخلات "
+        "بفواصل. مثال: إخفاء القيمة بعد \"Ref, Dated\" يخفي الرقم المرجعي والتاريخ.",
+    # Reduce
+    "Compression": "الضغط",
+    "Lossless": "دون فقد",
+    "Balanced": "متوازن",
+    "Smallest": "أصغر حجم",
+    "File structure only. Quality unchanged; savings are usually small.":
+        "بنية الملف فقط، دون تغيير الجودة، والتوفير عادة قليل.",
+    "Images at 200 dpi, high quality. Text stays sharp. Recommended.":
+        "صور بدقة 200 نقطة/بوصة وجودة عالية مع بقاء النص واضحًا، وهو الخيار الموصى به.",
+    "Images at 150 dpi, stronger compression, e.g. for email.":
+        "صور بدقة 150 نقطة/بوصة وضغط أعلى، مناسب للبريد الإلكتروني.",
+    "At least 50% smaller: try stronger settings when needed (not with Lossless)":
+        "تقليل الحجم 50% على الأقل بتجربة إعدادات أقوى عند الحاجة (لا ينطبق على خيار دون فقد)",
+    "Convert colour pages to grayscale (smaller; use for black-and-white documents)":
+        "تحويل الصفحات الملونة إلى تدرج رمادي (حجم أصغر، ومناسب للمستندات غير الملونة)",
+    "Output: <name>_small.pdf. Searchable text is kept. Your original file is never changed.":
+        "الناتج ملف ‎<name>_small.pdf‎ مع الاحتفاظ بالنص القابل للبحث، ولا يتغير الملف الأصلي أبدًا.",
+    "images at 150 dpi": "صور بدقة 150 نقطة/بوصة",
+    "images at 120 dpi, black-and-white scans at 250 dpi":
+        "صور بدقة 120 نقطة/بوصة ومسح أبيض وأسود بدقة 250 نقطة/بوصة",
+    "images at 120 dpi, black-and-white scans at 200 dpi":
+        "صور بدقة 120 نقطة/بوصة ومسح أبيض وأسود بدقة 200 نقطة/بوصة",
+    "{percent}% smaller": "أصغر بنسبة {percent}%",
+    "less than 1% smaller": "أصغر بأقل من 1%",
+    "not 50%: {reason}": "لم يبلغ 50% لأن {reason}",
+    "Not saved: could not be made smaller ({size}); {reason}":
+        "لم يُحفظ لتعذر تقليل الحجم ({size}) لأن {reason}",
+    "attached files take {percent}% of it and are kept as they are":
+        "الملفات المرفقة تشغل {percent}% منه وتبقى كما هي",
+    "embedded fonts take {percent}% of it": "الخطوط المضمّنة تشغل {percent}% منه",
+    "it is mostly text and drawings, which cannot be compressed further without turning pages into pictures":
+        "معظمه نصوص ورسومات لا يمكن ضغطها أكثر دون تحويل الصفحات إلى صور",
+    "its images are already compressed": "صوره مضغوطة مسبقًا",
+    "it is already compact": "حجمه صغير أصلًا",
+    "The original is digitally signed; the smaller copy's signature is no longer valid. "
+    "Keep the original for official use.":
+        "الملف الأصلي موقّع رقميًا، والتوقيع في النسخة المصغّرة لم يعد صالحًا، لذا احتفظ بالأصل للاستخدام الرسمي.",
+    # Tables
+    "Finds tables drawn with grid lines, in digital and scanned documents. Each table becomes a sheet in "
+    "<name>_tables.xlsx, with amounts stored as numbers. Tables without lines are not detected. In scanned "
+    "Arabic tables, check the numbers: Arabic-Indic digits are often misread.":
+        "يعثر على الجداول المرسومة بخطوط في المستندات الرقمية والممسوحة ضوئيًا، ويضع كل جدول في ورقة مستقلة "
+        "داخل ‎<name>_tables.xlsx‎ مع حفظ المبالغ كأرقام. لا تُكتشف الجداول التي بلا خطوط. وفي الجداول العربية "
+        "الممسوحة ضوئيًا راجع الأرقام، فالأرقام الهندية كثيرًا ما تُقرأ بشكل خاطئ.",
+    "{tables} table(s) on {pages} page(s)": "عدد الجداول {tables} في {pages} صفحة",
+    "No ruled tables found": "لم يتم العثور على جداول مخططة",
+    # Library
+    "Search": "بحث",
+    "Show all documents": "عرض كل المستندات",
+    "All words must appear on the same page. Use quotes for an exact phrase, e.g. \"chilled water\". "
+    "Arabic letter forms and digits are matched either way.":
+        "يجب أن تظهر جميع الكلمات في الصفحة نفسها. استخدم علامات التنصيص لعبارة مطابقة، مثل \"المياه المبردة\". "
+        "وتتطابق أشكال الحروف العربية والأرقام بأي صيغة كُتبت.",
+    "Document": "المستند",
+    "Page": "الصفحة",
+    "Text found": "النص الموجود",
+    "Added": "تاريخ الإضافة",
+    "Open document": "فتح المستند",
+    "Open folder": "فتح المجلد",
+    "Add documents…": "إضافة مستندات",
+    "Remove from library": "إزالة من المكتبة",
+    "Remove missing files": "إزالة الملفات المفقودة",
+    "Add documents automatically after Make searchable and Convert to Markdown":
+        "إضافة المستندات تلقائيًا بعد جعلها قابلة للبحث أو تحويلها إلى Markdown",
+    "{documents} document(s), {pages} page(s) in the library": "في المكتبة {documents} مستند و{pages} صفحة",
+    "Search failed": "تعذر البحث",
+    "(missing)": "(مفقود)",
+    "{count} page(s) found for “{query}”": "عدد الصفحات التي تحتوي على “{query}” هو {count}",
+    "(first 500 shown)": "(تُعرض أول 500 نتيجة)",
+    "Sheet {number}": "الورقة {number}",
+    "Slide {number}": "الشريحة {number}",
+    "File not found": "الملف غير موجود",
+    "The file was moved or deleted. Use \"Remove missing files\" to clean up the library.":
+        "تم نقل الملف أو حذفه. استخدم \"إزالة الملفات المفقودة\" لتنظيف المكتبة.",
+    "Opened {name}. The text was found on page {page}.": "تم فتح {name}، والنص موجود في الصفحة {page}.",
+    "Cannot open": "تعذر الفتح",
+    "Remove {count} document(s) from the library?\n\nThe files themselves are not deleted.":
+        "هل تريد إزالة {count} مستند من المكتبة؟\n\nلن تُحذف الملفات نفسها.",
+    "Library": "المكتبة",
+    "{count} missing document(s) removed from the library.": "تمت إزالة {count} مستند مفقود من المكتبة.",
+    "Add documents to the library": "إضافة مستندات إلى المكتبة",
+    "Document {number} of {total}": "المستند {number} من {total}",
+    "Document {number} of {total}: reading {name}": "المستند {number} من {total}، جارٍ قراءة {name}",
+    "Library: {added} of {total} document(s) added.": "المكتبة: تمت إضافة {added} من {total} مستند.",
+    # Settings
+    "Appearance": "المظهر",
+    "Interface language": "لغة الواجهة",
+    "Automatic (as the computer)": "تلقائي (حسب لغة الجهاز)",
+    "Arabic text display:": "طريقة عرض النص العربي",
+    "Method 1": "الطريقة 1",
+    "Method 2": "الطريقة 2",
+    "Method 3": "الطريقة 3",
+    "If Arabic words appear reversed or with separated letters, try another method.":
+        "إذا ظهرت الكلمات العربية معكوسة أو بحروف متقطعة فجرّب طريقة أخرى.",
+    "The language can be changed when the current work finishes.": "يمكن تغيير اللغة بعد انتهاء العمل الحالي.",
+    "Updates": "التحديثات",
+    "Check for a newer version once a day (only the version number is requested)":
+        "التحقق من وجود إصدار أحدث مرة يوميًا (يُطلب رقم الإصدار فقط)",
+    "Add documents to the library automatically after processing": "إضافة المستندات إلى المكتبة تلقائيًا بعد المعالجة",
+    "Library file: {path}": "ملف المكتبة {path}",
+    "Reset": "إعادة الضبط",
+    "Reset all settings": "إعادة ضبط كل الإعدادات",
+    "Settings file: {path}": "ملف الإعدادات {path}",
+    "Reset settings": "إعادة ضبط الإعدادات",
+    "Restore all options to their default values?": "هل تريد إعادة جميع الخيارات إلى قيمها الافتراضية؟",
+    # About and feedback
+    "Created by {credit}.": "من تطوير {credit}.",
+    "Free software under the GNU Affero General Public License v3.0 (AGPL-3.0), provided without any warranty.":
+        "برنامج حر بموجب رخصة GNU Affero العامة الإصدار 3.0 ‏(AGPL-3.0)، ويُقدَّم دون أي ضمان.",
+    "All processing runs on this computer. No document is uploaded anywhere.":
+        "تتم جميع المعالجة على هذا الجهاز، ولا يُرفع أي مستند إلى أي مكان.",
+    "Report a bug or suggest an improvement": "الإبلاغ عن مشكلة أو اقتراح تحسين",
+    "Check for updates now": "التحقق من التحديثات الآن",
+    "Project page": "صفحة المشروع",
+    "Feedback is sent through your email app to {email}.": "تُرسل الملاحظات عبر تطبيق البريد إلى {email}.",
+    "Report a problem": "الإبلاغ عن مشكلة",
+    "Type": "النوع",
+    "Bug report": "بلاغ عن مشكلة",
+    "Improvement suggestion": "اقتراح تحسين",
+    "Summary *": "الملخص *",
+    "Your name": "اسمك",
+    "Details *": "التفاصيل *",
+    "Steps to\nreproduce": "خطوات\nتكرار المشكلة",
+    "Include app and system information": "تضمين معلومات التطبيق والنظام",
+    "Include recent activity log": "تضمين سجل النشاط الأخير",
+    "The report opens as a new email to {email} in your email app. Review it there, then select Send.":
+        "يُفتح البلاغ كرسالة جديدة إلى {email} في تطبيق البريد، فراجعه هناك ثم اختر إرسال.",
+    "Cancel": "إلغاء",
+    "Copy report": "نسخ البلاغ",
+    "Open in email app": "فتح في تطبيق البريد",
+    "Summary required": "الملخص مطلوب",
+    "Enter a short summary.": "أدخل ملخصًا قصيرًا.",
+    "Details required": "التفاصيل مطلوبة",
+    "Describe the issue or suggestion.": "صف المشكلة أو الاقتراح.",
+    "Report copied": "تم نسخ البلاغ",
+    "The report is copied to the clipboard.\nPaste it into an email to {email}.":
+        "تم نسخ البلاغ إلى الحافظة.\nالصقه في رسالة بريد إلى {email}.",
+    "Email app not available": "تطبيق البريد غير متاح",
+    "No email app could be opened. The report is copied to the clipboard.\nPaste it into an email to {email}.":
+        "تعذر فتح تطبيق البريد، وتم نسخ البلاغ إلى الحافظة.\nالصقه في رسالة بريد إلى {email}.",
+    "Your email app opened with the report. Review it, then select Send.":
+        "فُتح تطبيق البريد ومعه البلاغ، فراجعه ثم اختر إرسال.",
+    "The email holds a shortened version. The full report is on the clipboard.":
+        "تحتوي الرسالة على نسخة مختصرة، والبلاغ الكامل موجود في الحافظة.",
+    "Email ready": "الرسالة جاهزة",
+    # Action bar, results, log
+    "Stop": "إيقاف",
+    "Open output folder": "فتح مجلد النتائج",
+    "Results": "النتائج",
+    "double-click to open": "انقر نقرًا مزدوجًا للفتح",
+    "Tool": "الأداة",
+    "File": "الملف",
+    "Saved as": "حُفظ باسم",
+    "Details": "التفاصيل",
+    "Activity": "سجل النشاط",
+    "Activity (hidden)": "سجل النشاط (مخفي)",
+    "Cannot open file": "تعذر فتح الملف",
+    "Work in progress": "العمل جارٍ",
+    "Processing is still running. Stop and close?": "ما زالت المعالجة جارية، فهل تريد الإيقاف والإغلاق؟",
+    "Invalid page selection": "تحديد صفحات غير صحيح",
+    "Enter pages as numbers or ranges, for example: 1-5, 9": "أدخل الصفحات كأرقام أو نطاقات، مثل 1-5, 9",
+    "OCR data not ready": "بيانات التعرف الضوئي غير جاهزة",
+    # Updates
+    "A new version is available: GrepAll {version}": "يتوفر إصدار جديد من ‪GrepAll {version}‬",
+    "Download": "تنزيل",
+    "Dismiss": "إغلاق",
+    "Could not reach GitHub. Check your internet connection.": "تعذر الوصول إلى GitHub، فتحقق من اتصالك بالإنترنت.",
+    "You have the latest version ({version}).": "لديك أحدث إصدار ({version}).",
+    # Worker messages
+    "{count} images ({title})": "عدد الصور {count} ({title})",
+    "{job}: {name}, page {page} ({current} of {total})": "{job}، {name}، الصفحة {page} ({current} من {total})",
+    "{job}: reducing {name}": "{job}، جارٍ تقليل حجم {name}",
+    "{job}: converting {name}": "{job}، جارٍ تحويل {name}",
+    "{job}: finding tables in {name}, page {current} of {total}":
+        "{job}، جارٍ البحث عن الجداول في {name}، الصفحة {current} من {total}",
+    "{ocr} page(s) read with OCR, {copied} with existing text":
+        "قُرئت {ocr} صفحة بالتعرف الضوئي و{copied} صفحة بنصها الموجود",
+    "hidden: {count}": "المخفي {count}",
+    "{count} area(s) blacked out": "تم حجب {count} موضع",
+    "Failed: {error}": "فشل: {error}",
+    "Stopped. {done} file(s) done.": "توقف العمل بعد إنجاز {done} ملف.",
+    "{tool} finished: {done} of {total} file(s).": "اكتمل {tool} لعدد {done} من {total} ملف.",
 }
 
 
@@ -149,6 +670,13 @@ def load_settings() -> dict:
         settings["theme"] = "dark"
     if settings["reduce_level"] not in REDUCE_LEVELS:
         settings["reduce_level"] = "Balanced"
+    if settings["ui_language"] not in ("auto",) + tuple(UI_LANGUAGES):
+        settings["ui_language"] = "auto"
+    if settings["arabic_display"] not in ARABIC_DISPLAY_MODES:
+        settings["arabic_display"] = "embed"
+    for key, options in (("language", LANGUAGES), ("quality", RESOLUTIONS)):
+        if settings[key] not in options:
+            settings[key] = DEFAULT_SETTINGS[key]
     return settings
 
 
@@ -769,51 +1297,197 @@ def write_tables_xlsx(tables: list[dict], path: Path, title: str) -> None:
 
 # =============================================================== reduce file size
 REDUCE_LEVELS = {
-    # name: (description, image settings or None for structure-only clean-up)
-    "Lossless": ("File structure only. Quality unchanged; savings are usually small.", None),
+    # name: (description, settings). "photo": (dpi threshold, target dpi, JPEG quality) for colour and
+    # grayscale images; "bw": (dpi threshold, target dpi) for black-and-white (1-bit) scans, kept lossless.
+    "Lossless": ("File structure only. Quality unchanged; savings are usually small.", {}),
     "Balanced": ("Images at 200 dpi, high quality. Text stays sharp. Recommended.",
-                 dict(dpi_threshold=225, dpi_target=200, quality=80)),
+                 {"photo": (225, 200, 80), "bw": (420, 300)}),
     "Smallest": ("Images at 150 dpi, stronger compression, e.g. for email.",
-                 dict(dpi_threshold=165, dpi_target=150, quality=65)),
+                 {"photo": (165, 150, 65), "bw": (320, 300)}),
 }
+# Stronger settings tried in turn when "at least 50% smaller" is selected (not with Lossless). Text stays
+# readable: scans are never taken below 120 dpi (colour/gray) or 200 dpi (black and white, fax quality).
+REDUCE_STEPS = [
+    ("images at 150 dpi", {"photo": (165, 150, 60), "bw": (320, 300)}),
+    ("images at 120 dpi, black-and-white scans at 250 dpi", {"photo": (130, 120, 50), "bw": (260, 250)}),
+    ("images at 120 dpi, black-and-white scans at 200 dpi", {"photo": (130, 120, 45), "bw": (210, 200)}),
+]
+REDUCE_TARGET = 0.5  # "at least 50% smaller"
 
 
-def reduce_pdf(src: Path, dst: Path, level: str = "Balanced", grayscale: bool = False) -> tuple[int, int, bool]:
-    """Write a smaller copy of a PDF. Returns (size before, size after, saved).
-    Nothing is saved when the result would not be smaller than the original."""
-    before = src.stat().st_size
+def _rewrite_images(doc, settings: dict, grayscale: bool) -> None:
+    photo, bw = settings.get("photo"), settings.get("bw")
+    if photo or grayscale:
+        threshold, target, quality = photo or (10000, 0, 90)
+        doc.rewrite_images(dpi_threshold=threshold, dpi_target=target, quality=quality,
+                           bitonal=False, set_to_gray=grayscale)
+    if bw:
+        # 1-bit scans (typical for signed contracts) stay 1-bit; very high resolutions are lowered.
+        rewrite_bitonal(doc, bw[0], bw[1])
+
+
+def _g4(im):
+    """CCITT Group 4 (fax) data for a 1-bit image, as one strip, and its TIFF photometric value."""
+    from PIL import Image
+    b = io.BytesIO()
+    im.save(b, "TIFF", compression="group4", tiffinfo={278: im.height})
+    t = Image.open(io.BytesIO(b.getvalue()))
+    offsets, counts = t.tag_v2[273], t.tag_v2[279]
+    raw = b.getvalue()
+    if len(offsets) != 1:
+        return None, t.tag_v2.get(262)
+    return raw[offsets[0]:offsets[0] + counts[0]], t.tag_v2.get(262)
+
+
+def rewrite_bitonal(doc, threshold: float, target: float) -> int:
+    """Store black-and-white (1-bit) scans as Group 4 fax images, lowering resolutions above the threshold.
+    Each image is replaced only when the new data is smaller. Returns the number of images changed."""
+    from PIL import Image
+    dpis: dict[int, float] = {}
+    for page in doc:
+        for info in page.get_image_info(xrefs=True):
+            xref = info.get("xref")
+            r = pymupdf.Rect(info["bbox"])
+            if not xref or r.width <= 0 or r.height <= 0:
+                continue
+            dpi = max(info["width"] / (r.width / 72), info["height"] / (r.height / 72))
+            dpis[xref] = max(dpis.get(xref, 0), dpi)
+    changed = 0
+    for xref, dpi in dpis.items():
+        def key(name: str, xref: int = xref) -> str:
+            return doc.xref_get_key(xref, name)[1]
+        if key("BitsPerComponent") != "1" or key("ImageMask") == "true" or key("Decode") != "null" \
+                or key("SMask") != "null" or key("Mask") != "null":
+            continue
+        filt = key("Filter")
+        if "JBIG2" in filt or ("CCITT" in filt and dpi <= threshold):
+            continue
+        pix = pymupdf.Pixmap(doc, xref)
+        if pix.n != 1 or pix.alpha:
+            pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
+        im = Image.frombytes("L", (pix.width, pix.height), pix.samples)
+        if dpi > threshold:
+            scale = target / dpi
+            im = im.resize((max(1, round(im.width * scale)), max(1, round(im.height * scale))), Image.Resampling.BOX)
+        im = im.point(lambda v: 255 if v >= 128 else 0).convert("1")
+        data, photometric = _g4(im)
+        if data is None or len(data) >= len(doc.xref_stream_raw(xref) or b""):
+            continue
+        doc.update_stream(xref, data, compress=False)
+        doc.xref_set_key(xref, "Filter", "/CCITTFaxDecode")
+        doc.xref_set_key(xref, "DecodeParms", f"<</K -1/Columns {im.width}/Rows {im.height}/BlackIs1 {'true' if photometric == 1 else 'false'}>>")
+        doc.xref_set_key(xref, "Width", str(im.width))
+        doc.xref_set_key(xref, "Height", str(im.height))
+        doc.xref_set_key(xref, "ColorSpace", "/DeviceGray")
+        changed += 1
+    return changed
+
+
+def pdf_breakdown(doc) -> Counter:
+    """Bytes used by images, drawings and text (page content), fonts, attached files and the rest."""
+    sizes: Counter = Counter()
+    content = set()
+    for page in doc:
+        try:
+            content.update(page.get_contents())
+        except Exception:
+            pass
+    for xref in range(1, doc.xref_length()):
+        try:
+            if not doc.xref_is_stream(xref):
+                continue
+            size = len(doc.xref_stream_raw(xref) or b"")
+            subtype = doc.xref_get_key(xref, "Subtype")[1]
+            kind = doc.xref_get_key(xref, "Type")[1]
+            if subtype == "/Image":
+                sizes["images"] += size
+            elif kind == "/EmbeddedFile":
+                sizes["attachments"] += size
+            elif xref in content or subtype == "/Form":
+                sizes["drawings"] += size
+            elif (doc.xref_get_key(xref, "Length1")[0] != "null"
+                  or subtype in ("/Type1C", "/CIDFontType0C", "/OpenType")):
+                sizes["fonts"] += size
+            else:
+                sizes["other"] += size
+        except Exception:
+            continue
+    return sizes
+
+
+def reduce_reason(breakdown: Counter) -> str:
+    """Plain-language (translated) reason why a file cannot be made much smaller."""
+    total = sum(breakdown.values()) or 1
+    share = {key: round(100 * value / total) for key, value in breakdown.items()}
+    if share.get("attachments", 0) >= 25:
+        return tr("attached files take {percent}% of it and are kept as they are", percent=share["attachments"])
+    if share.get("fonts", 0) >= 30:
+        return tr("embedded fonts take {percent}% of it", percent=share["fonts"])
+    if share.get("drawings", 0) >= 40:
+        return tr("it is mostly text and drawings, which cannot be compressed further without turning pages "
+                  "into pictures")
+    if share.get("images", 0) >= 50:
+        return tr("its images are already compressed")
+    return tr("it is already compact")
+
+
+def _reduce_attempt(src: Path, dst: Path, settings: dict, grayscale: bool) -> int:
     doc = pymupdf.open(src)
-    if doc.needs_pass:
-        doc.close()
-        raise RuntimeError("The PDF is password-protected.")
-    temp = dst.with_name(dst.stem + ".partial.pdf")
     try:
-        settings = REDUCE_LEVELS[level][1]
-        if settings or grayscale:
-            # Black-and-white scans are already stored very compactly, so they are left as they are.
-            doc.rewrite_images(**(settings or dict(dpi_threshold=10000, dpi_target=0, quality=90)),
-                               bitonal=False, set_to_gray=grayscale)
+        _rewrite_images(doc, settings, grayscale)
         try:
             doc.subset_fonts()  # keep only the characters that are used
         except Exception:
             pass
-        doc.save(temp, garbage=4, deflate=True, deflate_images=True, deflate_fonts=True,
-                 use_objstms=True, clean=True)
-        doc.close()
-        after = temp.stat().st_size
-        if after >= before:
-            temp.unlink()
-            return before, before, False
-        os.replace(temp, dst)
-        return before, after, True
+        doc.save(dst, garbage=4, deflate=True, deflate_images=True, deflate_fonts=True, use_objstms=True, clean=True)
     finally:
-        if not doc.is_closed:
-            doc.close()
-        if temp.exists():
-            try:
-                temp.unlink()
-            except OSError:
-                pass
+        doc.close()
+    return dst.stat().st_size
+
+
+def reduce_pdf(src: Path, dst: Path, level: str = "Balanced", grayscale: bool = False,
+               target: float = 0.0, cancel=None) -> dict:
+    """Write a smaller copy of a PDF. With target (e.g. 0.5), stronger settings are tried until the copy is at
+    least that much smaller. Returns before, after, saved, step (the stronger setting used, if any), reached,
+    reason (why it could not shrink more) and signed (the original carries a digital signature)."""
+    before = src.stat().st_size
+    with pymupdf.open(src) as probe:
+        if probe.needs_pass:
+            raise RuntimeError("The PDF is password-protected.")
+        signed = bool(probe.get_sigflags() > 0) if hasattr(probe, "get_sigflags") else False
+        breakdown = pdf_breakdown(probe)
+    temp = dst.with_name(dst.stem + ".partial.pdf")
+    best = dst.with_name(dst.stem + ".best.pdf")
+    attempts = [("", REDUCE_LEVELS[level][1])]
+    target = target if level != "Lossless" else 0.0
+    if target:
+        attempts += [step for step in REDUCE_STEPS]
+    best_size, best_step = before, ""
+    try:
+        for step, settings in attempts:
+            if cancel is not None and cancel():
+                break
+            size = _reduce_attempt(src, temp, settings, grayscale)
+            if size < best_size:
+                os.replace(temp, best)
+                best_size, best_step = size, step
+            if not target or best_size <= before * (1 - target):
+                break
+        result = {"before": before, "after": best_size, "saved": best_size < before, "step": best_step,
+                  "reached": best_size <= before * (1 - target) if target else True,
+                  "reason": "", "signed": signed}
+        if result["saved"]:
+            os.replace(best, dst)
+        if not result["reached"] or not result["saved"]:
+            result["reason"] = reduce_reason(breakdown)
+        return result
+    finally:
+        for leftover in (temp, best):
+            if leftover.exists():
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
 
 
 def human_size(size: int) -> str:
@@ -1288,7 +1962,7 @@ def docx_sections(path: Path) -> tuple[list[tuple[str, str]], str]:
             out[-1] += "\n" + block
         else:
             out.append(block)
-    summary = f"Word: {paragraphs} paragraph(s), {tables} table(s)"
+    summary = tr("Word: {paragraphs} paragraph(s), {tables} table(s)", paragraphs=paragraphs, tables=tables)
     return [("", "\n\n".join(out))], summary
 
 
@@ -1358,12 +2032,14 @@ def xlsx_sections(path: Path) -> tuple[list[tuple[str, str]], str]:
     finally:
         wb.close()
         formulas.close()
-    summary = f"Excel: {len(sections)} sheet(s), {total_rows:,} row(s)"
+    summary = tr("Excel: {sheets} sheet(s), {rows} row(s)", sheets=len(sections), rows=f"{total_rows:,}")
     if hidden:
-        summary += f", {hidden} hidden sheet(s) skipped"
+        summary += tr(", {count} hidden sheet(s) skipped", count=hidden)
     if uncalculated:
-        summary += (f"; {uncalculated} formula result(s) missing (the file was not saved by Excel: "
-                    "open it in Excel, save it, and convert again)")
+        summary = OfficeSummary(summary + tr("; ") + tr(
+            "{count} formula result(s) missing (the file was not saved by Excel: open it in Excel, save it, "
+            "and convert again)", count=uncalculated))
+        summary.warn = True
     return sections, summary
 
 
@@ -1413,7 +2089,12 @@ def pptx_sections(path: Path) -> tuple[list[tuple[str, str]], str]:
                 parts.append("> **Notes:** " + notes.replace("\n", "\n> "))
         heading = f"Slide {number}" + (f": {title}" if title else "")
         sections.append((heading, "\n\n".join(parts) or "_[no text on this slide]_"))
-    return sections, f"PowerPoint: {len(sections)} slide(s)"
+    return sections, tr("PowerPoint: {slides} slide(s)", slides=len(sections))
+
+
+class OfficeSummary(str):
+    """Summary text that can carry a warning flag (e.g. Excel formulas without saved results)."""
+    warn = False
 
 
 def office_sections(path: Path) -> tuple[list[tuple[str, str]], str]:
@@ -1466,7 +2147,7 @@ class FeedbackDialog(tk.Toplevel):
     def __init__(self, parent: "PdfOcrApp") -> None:
         super().__init__(parent)
         self.parent = parent
-        self.title("Report a bug or suggest an improvement")
+        self.title(tr("Report a bug or suggest an improvement"))
         self.transient(parent)
         self.resizable(True, True)
         self.minsize(520, 520)
@@ -1479,49 +2160,50 @@ class FeedbackDialog(tk.Toplevel):
 
         body = ttk.Frame(self, padding=16)
         body.pack(fill="both", expand=True)
-        body.columnconfigure(1, weight=1)
+        label_col, field_col = grid_col(0, 1, 2), grid_col(1, 1, 2)
+        body.columnconfigure(field_col, weight=1)
         body.rowconfigure(3, weight=1)
         body.rowconfigure(4, weight=1)
 
-        ttk.Label(body, text="Type").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(body, text=tr("Type")).grid(row=0, column=label_col, sticky=W, pady=4, padx=PX(0, 10))
         types = ttk.Frame(body)
-        types.grid(row=0, column=1, sticky="w", pady=4)
+        types.grid(row=0, column=field_col, sticky=W, pady=4)
         for value in self.TYPES:
-            ttk.Radiobutton(types, text=value, value=value, variable=self.kind,
-                            command=self._toggle_steps).pack(side="left", padx=(0, 16))
+            ttk.Radiobutton(types, text=tr(value), value=value, variable=self.kind,
+                            command=self._toggle_steps).pack(side=LEFT, padx=PX(0, 16))
 
-        ttk.Label(body, text="Summary *").grid(row=1, column=0, sticky="w", pady=4)
-        self.summary_entry = ttk.Entry(body, textvariable=self.summary)
-        self.summary_entry.grid(row=1, column=1, sticky="ew", pady=4)
+        ttk.Label(body, text=tr("Summary *")).grid(row=1, column=label_col, sticky=W, pady=4, padx=PX(0, 10))
+        self.summary_entry = ttk.Entry(body, textvariable=self.summary, justify=JUSTIFY)
+        self.summary_entry.grid(row=1, column=field_col, sticky="ew", pady=4)
 
-        ttk.Label(body, text="Your name").grid(row=2, column=0, sticky="w", pady=4)
-        ttk.Entry(body, textvariable=self.name).grid(row=2, column=1, sticky="ew", pady=4)
+        ttk.Label(body, text=tr("Your name")).grid(row=2, column=label_col, sticky=W, pady=4, padx=PX(0, 10))
+        ttk.Entry(body, textvariable=self.name, justify=JUSTIFY).grid(row=2, column=field_col, sticky="ew", pady=4)
 
-        ttk.Label(body, text="Details *").grid(row=3, column=0, sticky="nw", pady=4)
+        ttk.Label(body, text=tr("Details *")).grid(row=3, column=label_col, sticky=NW, pady=4, padx=PX(0, 10))
         self.details = tk.Text(body, height=6, wrap="word")
-        self.details.grid(row=3, column=1, sticky="nsew", pady=4)
+        self.details.grid(row=3, column=field_col, sticky="nsew", pady=4)
 
-        self.steps_label = ttk.Label(body, text="Steps to\nreproduce")
-        self.steps_label.grid(row=4, column=0, sticky="nw", pady=4)
+        self.steps_label = ttk.Label(body, text=tr("Steps to\nreproduce"), justify=JUSTIFY)
+        self.steps_label.grid(row=4, column=label_col, sticky=NW, pady=4, padx=PX(0, 10))
         self.steps = tk.Text(body, height=4, wrap="word")
-        self.steps.grid(row=4, column=1, sticky="nsew", pady=4)
+        self.steps.grid(row=4, column=field_col, sticky="nsew", pady=4)
         self.steps.insert("1.0", "1. \n2. \n3. ")
 
-        ttk.Checkbutton(body, text="Include app and system information", variable=self.include_system)\
-            .grid(row=5, column=1, sticky="w", pady=(8, 0))
-        ttk.Checkbutton(body, text="Include recent activity log", variable=self.include_log)\
-            .grid(row=6, column=1, sticky="w")
+        ttk.Checkbutton(body, text=tr("Include app and system information"), variable=self.include_system)\
+            .grid(row=5, column=field_col, sticky=W, pady=(8, 0))
+        ttk.Checkbutton(body, text=tr("Include recent activity log"), variable=self.include_log)\
+            .grid(row=6, column=field_col, sticky=W)
 
-        ttk.Label(body, text=f"The report opens as a new email to {FEEDBACK_EMAIL} in your email app. "
-                             "Review it there, then select Send.",
-                  style="Muted.TLabel", wraplength=460, justify="left")\
-            .grid(row=7, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ttk.Label(body, text=tr("The report opens as a new email to {email} in your email app. "
+                                "Review it there, then select Send.", email=FEEDBACK_EMAIL),
+                  style="Muted.TLabel", wraplength=460, justify=JUSTIFY)\
+            .grid(row=7, column=0, columnspan=2, sticky=W, pady=(12, 0))
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Copy report", command=self.copy_report).pack(side="right", padx=8)
-        ttk.Button(buttons, text="Open in email app", command=self.send).pack(side="right")
+        buttons.grid(row=8, column=0, columnspan=2, sticky=E, pady=(12, 0))
+        ttk.Button(buttons, text=tr("Cancel"), command=self.destroy).pack(side=RIGHT)
+        ttk.Button(buttons, text=tr("Copy report"), command=self.copy_report).pack(side=RIGHT, padx=8)
+        ttk.Button(buttons, text=tr("Open in email app"), command=self.send).pack(side=RIGHT)
 
         for text_box in (self.details, self.steps):
             getattr(parent, "style_text", lambda _w: None)(text_box)
@@ -1545,11 +2227,11 @@ class FeedbackDialog(tk.Toplevel):
 
     def _validate(self) -> bool:
         if not self.summary.get().strip():
-            messagebox.showwarning("Summary required", "Enter a short summary.", parent=self)
+            messagebox.showwarning(tr("Summary required"), tr("Enter a short summary."), parent=self)
             self.summary_entry.focus_set()
             return False
         if not self.details.get("1.0", "end").strip():
-            messagebox.showwarning("Details required", "Describe the issue or suggestion.", parent=self)
+            messagebox.showwarning(tr("Details required"), tr("Describe the issue or suggestion."), parent=self)
             self.details.focus_set()
             return False
         return True
@@ -1583,9 +2265,9 @@ class FeedbackDialog(tk.Toplevel):
         if not self._validate():
             return
         self._copy_to_clipboard(f"To: {FEEDBACK_EMAIL}\nSubject: {self._subject()}\n\n{self._report()}")
-        messagebox.showinfo("Report copied",
-                            f"The report is copied to the clipboard.\nPaste it into an email to {FEEDBACK_EMAIL}.",
-                            parent=self)
+        messagebox.showinfo(tr("Report copied"),
+                            tr("The report is copied to the clipboard.\nPaste it into an email to {email}.",
+                               email=FEEDBACK_EMAIL), parent=self)
 
     def send(self) -> None:
         if not self._validate():
@@ -1614,14 +2296,14 @@ class FeedbackDialog(tk.Toplevel):
         except Exception:
             self._copy_to_clipboard(f"To: {FEEDBACK_EMAIL}\nSubject: {self._subject()}\n\n{full_report}")
             messagebox.showwarning(
-                "Email app not available",
-                f"No email app could be opened. The report is copied to the clipboard.\n"
-                f"Paste it into an email to {FEEDBACK_EMAIL}.", parent=self)
+                tr("Email app not available"),
+                tr("No email app could be opened. The report is copied to the clipboard.\n"
+                   "Paste it into an email to {email}.", email=FEEDBACK_EMAIL), parent=self)
             return
-        message = "Your email app opened with the report. Review it, then select Send."
+        message = tr("Your email app opened with the report. Review it, then select Send.")
         if body_text != full_report:
-            message += "\n\nThe email holds a shortened version. The full report is on the clipboard."
-        messagebox.showinfo("Email ready", message, parent=self)
+            message += "\n\n" + tr("The email holds a shortened version. The full report is on the clipboard.")
+        messagebox.showinfo(tr("Email ready"), message, parent=self)
         self.destroy()
 
 
@@ -1664,14 +2346,85 @@ def version_tuple(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", text)[:3])
 
 
-def fetch_latest_release(timeout: float = 6.0) -> tuple[str, str]:
-    """Ask GitHub for the latest release. Sends no document or personal data."""
+def fetch_latest_release_info(timeout: float = 6.0) -> dict:
+    """Ask GitHub for the latest release (version, page and download files). Sends no document or personal data."""
     request = urllib.request.Request(
         f"https://api.github.com/repos/{REPOSITORY}/releases/latest",
         headers={"Accept": "application/vnd.github+json", "User-Agent": f"{APP_NAME}/{APP_VERSION}"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         data = json.load(response)
-    return str(data.get("tag_name", "")), str(data.get("html_url") or RELEASES_URL)
+    assets = [{"name": str(a.get("name", "")), "url": str(a.get("browser_download_url", "")),
+               "size": int(a.get("size") or 0), "digest": str(a.get("digest") or "")}
+              for a in data.get("assets", []) if isinstance(a, dict)]
+    return {"tag": str(data.get("tag_name", "")), "url": str(data.get("html_url") or RELEASES_URL), "assets": assets}
+
+
+def fetch_latest_release(timeout: float = 6.0) -> tuple[str, str]:
+    info = fetch_latest_release_info(timeout)
+    return info["tag"], info["url"]
+
+
+# --------------------------------------------------------------- in-app update
+def update_asset(assets: list[dict]) -> dict | None:
+    """The release file this computer can install by itself: the Windows installer or the Linux package.
+    None when running from source (VS Code), where updates come from the project files instead."""
+    if not getattr(sys, "frozen", False):
+        return None
+    suffix = "-Windows-Setup.exe" if WINDOWS else "-Linux.tar.gz" if sys.platform.startswith("linux") else None
+    if not suffix:
+        return None
+    for asset in assets:
+        if asset["name"].endswith(suffix) and asset["url"].startswith("https://"):
+            return asset
+    return None
+
+
+def download_update(asset: dict, folder: Path, progress=None) -> Path:
+    """Download a release file and check it against the SHA-256 checksum GitHub publishes for it."""
+    import hashlib
+    target = folder / Path(asset["name"]).name
+    request = urllib.request.Request(asset["url"], headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
+    digest = hashlib.sha256()
+    done = 0
+    with urllib.request.urlopen(request, timeout=30) as response, open(target, "wb") as out:
+        total = int(response.headers.get("Content-Length") or asset.get("size") or 0)
+        while True:
+            chunk = response.read(256 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            digest.update(chunk)
+            done += len(chunk)
+            if progress:
+                progress(done, total)
+    if asset.get("size") and done != asset["size"]:
+        raise RuntimeError("The download is incomplete.")
+    expected = asset.get("digest", "")
+    if expected.startswith("sha256:") and expected.split(":", 1)[1].lower() != digest.hexdigest():
+        raise RuntimeError("The downloaded file does not match the published checksum.")
+    return target
+
+
+def start_update_install(package: Path) -> None:
+    """Start installing a downloaded update in a separate process; the caller then closes GrepAll."""
+    if WINDOWS:
+        # The usual installer window: same folder, settings kept; it offers to start GrepAll at the end.
+        subprocess.Popen([str(package)], close_fds=True)
+        return
+    import tarfile
+    folder = package.parent / "extracted"
+    with tarfile.open(package) as archive:
+        try:
+            archive.extractall(folder, filter="data")
+        except TypeError:  # Python without extraction filters
+            archive.extractall(folder)
+    script = next(folder.glob("*/install_linux.sh"), None)
+    if script is None:
+        raise RuntimeError("install_linux.sh was not found in the downloaded package.")
+    app = Path.home() / ".local/share/grepall/GrepAll"
+    command = (f'sleep 2; bash "{script}" > "{package.parent / "install.log"}" 2>&1 '
+               f'&& nohup "{app}" > /dev/null 2>&1 &')
+    subprocess.Popen(["bash", "-c", command], start_new_session=True, close_fds=True)
 
 
 # =============================================================== main window
@@ -1720,18 +2473,14 @@ class PdfOcrApp(tk.Tk):
         self.title(f"{APP_NAME} {APP_VERSION}")
         settings = load_settings()
         self.settings = settings
+        install_text_hooks()
+        set_ui_language(settings["ui_language"] if settings["ui_language"] in UI_LANGUAGES else system_ui_language(),
+                        settings["arabic_display"])
         self.palette = PALETTES[settings["theme"]]
         self.style = ttk.Style(self)
         self.style.theme_use("clam")
-        base = tkfont.nametofont("TkDefaultFont")
-        family = "Segoe UI" if sys.platform.startswith("win") else base.actual("family")
-        self.fonts = {
-            "body": (family, 10), "small": (family, 9), "bold": (family, 10, "bold"),
-            "title": (family, 15, "bold"), "brand": (family, 13, "bold"), "group": (family, 8, "bold"),
-            "nav": (family, 10), "mono": tkfont.nametofont("TkFixedFont"),
-        }
-        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
-            tkfont.nametofont(name).configure(family=family, size=10)
+        self._default_family = tkfont.nametofont("TkDefaultFont").actual("family")
+        self._setup_fonts()
         self.geometry(self._fit_to_screen(settings["window_geometry"]))
         self.minsize(980, 660)
 
@@ -1744,7 +2493,8 @@ class PdfOcrApp(tk.Tk):
         self.library = DocumentLibrary()
         self.last_update_check = settings["last_update_check"]
 
-        string_keys = ("language", "quality", "output_dir", "redact_terms", "redact_labels", "reduce_level", "theme")
+        string_keys = ("language", "quality", "output_dir", "redact_terms", "redact_labels", "reduce_level", "theme",
+                       "ui_language", "arabic_display")
         self.vars: dict[str, tk.Variable] = {}
         for key, value in settings.items():
             if key in string_keys:
@@ -1754,7 +2504,7 @@ class PdfOcrApp(tk.Tk):
         self.pages_spec = tk.StringVar()
         self.force = tk.BooleanVar(value=False)
         self.search_text = tk.StringVar()
-        self.status = tk.StringVar(value="Ready")
+        self.status = VisVar(value=tr("Ready"))
         self.current_page = settings["last_page"] if any(p[1] == settings["last_page"] for p in PAGES) else "ocr"
 
         self._load_icon()
@@ -1769,6 +2519,21 @@ class PdfOcrApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------ basics
+    def _setup_fonts(self) -> None:
+        # Tahoma joins and spaces Arabic well on Windows; Segoe UI is the Windows standard for English.
+        if WINDOWS:
+            family = "Tahoma" if is_rtl() else "Segoe UI"
+        else:
+            family = self._default_family
+        size = 10
+        self.fonts = {
+            "body": (family, size), "small": (family, size - 1), "bold": (family, size, "bold"),
+            "title": (family, 15, "bold"), "brand": (family, 13, "bold"), "group": (family, 8, "bold"),
+            "nav": (family, size), "mono": tkfont.nametofont("TkFixedFont"),
+        }
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            tkfont.nametofont(name).configure(family=family, size=size)
+
     def _fit_to_screen(self, size: str) -> str:
         """Keep the window within the screen, leaving room for the taskbar."""
         width, height = (int(value) for value in size.split("x"))
@@ -1846,6 +2611,14 @@ class PdfOcrApp(tk.Tk):
                         indicatorforeground=p["on_accent"])
             s.map(f"{name}TRadiobutton", background=[("active", bg)],
                   indicatorbackground=[("selected", p["accent"]), ("active", p["input"])])
+        # Check boxes and option buttons: the box goes on the reading side (right for Arabic).
+        for name in ("", "Card.", "Side."):
+            for kind in ("Checkbutton", "Radiobutton"):
+                style = f"{name}T{kind}"
+                s.layout(style, [(f"{kind}.padding", {"sticky": "nswe", "children": [
+                    (f"{kind}.indicator", {"side": LEFT, "sticky": ""}),
+                    (f"{kind}.focus", {"side": LEFT, "sticky": W, "children": [
+                        (f"{kind}.label", {"sticky": "nswe"})]})]})])
         s.configure("Muted.TLabel", foreground=p["muted"])
         s.configure("Card.Muted.TLabel", background=p["card"], foreground=p["muted"])
         s.configure("Card.Head.TLabel", background=p["card"], foreground=p["text"], font=self.fonts["bold"])
@@ -1890,7 +2663,8 @@ class PdfOcrApp(tk.Tk):
             tree.tag_configure("missing", foreground=p["muted"])
         self._update_nav()
         self._set_badge(self.status_badge_state)
-        self.theme_button.configure(text="☀  Light" if self.vars["theme"].get() == "dark" else "☾  Dark")
+        self.theme_button.configure(text="☀  " + tr("Light") if self.vars["theme"].get() == "dark"
+                                    else "☾  " + tr("Dark"))
 
     def toggle_theme(self) -> None:
         theme = "light" if self.vars["theme"].get() == "dark" else "dark"
@@ -1910,7 +2684,7 @@ class PdfOcrApp(tk.Tk):
         body = ttk.Frame(outer, style="Card.TFrame", padding=(14, 10, 14, 12))
         body.pack(fill="both", expand=True)
         if title:
-            ttk.Label(body, text=title, style="Card.Head.TLabel").pack(anchor="w", pady=(0, 6))
+            ttk.Label(body, text=tr(title), style="Card.Head.TLabel").pack(anchor=W, pady=(0, 6))
         return outer, body
 
     def tree(self, parent, columns: list[tuple[str, str, int, bool]], height: int = 6):
@@ -1918,12 +2692,24 @@ class PdfOcrApp(tk.Tk):
         tree = ttk.Treeview(frame, columns=[c[0] for c in columns], show="headings", height=height,
                             selectmode="extended")
         for key, heading, width, stretch in columns:
-            tree.heading(key, text=heading, anchor="w")
-            tree.column(key, width=width, stretch=stretch, anchor="w")
+            tree.heading(key, text=tr(heading), anchor=W)
+            tree.column(key, width=width, stretch=stretch, anchor=W)
+        if is_rtl():
+            tree.configure(displaycolumns=[c[0] for c in reversed(columns)])
+            # Tk lets wide tables overflow on the right, which in Arabic is the first (most important) column,
+            # so the columns are scaled to fit the visible width instead.
+            base = {key: width for key, _, width, _ in columns}
+
+            def fit(event, tree=tree, base=base) -> None:
+                total = sum(base.values())
+                available = max(event.width - 4, 100)
+                for key, width in base.items():
+                    tree.column(key, width=max(40, int(width * available / total)), stretch=False)
+            tree.bind("<Configure>", fit, add="+")
         bar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=bar.set)
-        tree.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
+        tree.pack(side=LEFT, fill="both", expand=True)
+        bar.pack(side=RIGHT, fill="y")
         return frame, tree
 
     # ------------------------------------------------------------ layout
@@ -1933,15 +2719,18 @@ class PdfOcrApp(tk.Tk):
         top.pack(fill="x")
         top.pack_propagate(False)
         if self.header_image:
-            self.skin(tk.Label(top, image=self.header_image, bd=0), "topbar").pack(side="left", padx=(14, 0))
-        self.skin(tk.Label(top, text=APP_NAME, font=self.fonts["brand"]), "accent@topbar").pack(side="left", padx=(8, 6))
-        self.skin(tk.Label(top, text=APP_VERSION, font=self.fonts["small"]), "muted@topbar").pack(side="left", pady=(4, 0))
-        self.skin(tk.Label(top, text="  •  " + APP_TAGLINE, font=self.fonts["small"]), "muted@topbar").pack(
-            side="left", pady=(4, 0))
+            self.skin(tk.Label(top, image=self.header_image, bd=0), "topbar").pack(side=LEFT, padx=PX(14, 0))
+        self.skin(tk.Label(top, text=APP_NAME, font=self.fonts["brand"]), "accent@topbar").pack(side=LEFT, padx=PX(8, 6))
+        self.skin(tk.Label(top, text=APP_VERSION, font=self.fonts["small"]), "muted@topbar").pack(side=LEFT, pady=(4, 0))
+        self.skin(tk.Label(top, text="  •  " + tr(APP_TAGLINE), font=self.fonts["small"]), "muted@topbar").pack(
+            side=LEFT, pady=(4, 0))
         self.theme_button = self.button(top, "", self.toggle_theme)
-        self.theme_button.pack(side="right", padx=(6, 14))
+        self.theme_button.pack(side=RIGHT, padx=PX(6, 14))
+        # Language switch: shows the other language's name
+        self.language_button = self.button(top, "English" if is_rtl() else "العربية", self.toggle_language)
+        self.language_button.pack(side=RIGHT, padx=PX(6, 0))
         self.status_badge = tk.Label(top, text="", font=self.fonts["bold"], padx=12, pady=3)
-        self.status_badge.pack(side="right", padx=6)
+        self.status_badge.pack(side=RIGHT, padx=6)
         self.status_badge_state = "ready"
         self.skin(tk.Frame(self, height=1), "line").pack(fill="x")
         self.update_bar_holder = self.skin(tk.Frame(self), "window")
@@ -1953,32 +2742,32 @@ class PdfOcrApp(tk.Tk):
         status.pack_propagate(False)
         self.skin(tk.Frame(self, height=1), "line").pack(side="bottom", fill="x")
         self.progress_bar = ttk.Progressbar(status, mode="determinate", length=180)
-        self.progress_bar.pack(side="left", padx=(14, 10), pady=8)
-        self.skin(tk.Label(status, textvariable=self.status, font=self.fonts["small"], anchor="w"),
-                  "muted@topbar").pack(side="left", fill="x", expand=True)
-        self.skin(tk.Label(status, text=APP_CREDIT, font=self.fonts["small"]), "muted@topbar").pack(side="right", padx=14)
+        self.progress_bar.pack(side=LEFT, padx=PX(14, 10), pady=8)
+        self.skin(tk.Label(status, textvariable=self.status, font=self.fonts["small"], anchor=W, justify=JUSTIFY),
+                  "muted@topbar").pack(side=LEFT, fill="x", expand=True)
+        self.skin(tk.Label(status, text=APP_CREDIT, font=self.fonts["small"]), "muted@topbar").pack(side=RIGHT, padx=14)
 
         body = self.skin(tk.Frame(self), "window")
         body.pack(fill="both", expand=True)
 
         # Sidebar
         side = self.skin(tk.Frame(body, width=210), "sidebar")
-        side.pack(side="left", fill="y")
+        side.pack(side=LEFT, fill="y")
         side.pack_propagate(False)
-        self.skin(tk.Frame(body, width=1), "line").pack(side="left", fill="y")
+        self.skin(tk.Frame(body, width=1), "line").pack(side=LEFT, fill="y")
         self.nav_items: dict[str, tuple] = {}
         group = None
         for g, key, label, *_ in PAGES:
             if g != group:
                 group = g
-                self.skin(tk.Label(side, text=g, font=self.fonts["group"], anchor="w"), "muted@sidebar").pack(
+                self.skin(tk.Label(side, text=tr(g), font=self.fonts["group"], anchor=W), "muted@sidebar").pack(
                     fill="x", padx=18, pady=(16, 4))
             row = self.skin(tk.Frame(side), "sidebar")
             row.pack(fill="x")
             marker = tk.Frame(row, width=3)
-            marker.pack(side="left", fill="y")
-            item = tk.Label(row, text=label, font=self.fonts["nav"], anchor="w", padx=15, pady=7, cursor="hand2")
-            item.pack(side="left", fill="x", expand=True)
+            marker.pack(side=LEFT, fill="y")
+            item = tk.Label(row, text=tr(label), font=self.fonts["nav"], anchor=W, padx=15, pady=7, cursor="hand2")
+            item.pack(side=LEFT, fill="x", expand=True)
             for widget in (row, item):
                 widget.bind("<Button-1>", lambda _e, k=key: self.show_page(k))
                 widget.bind("<Enter>", lambda _e, k=key: self._hover_nav(k, True))
@@ -1987,15 +2776,16 @@ class PdfOcrApp(tk.Tk):
 
         # Content column
         content = self.skin(tk.Frame(body), "window")
-        content.pack(side="left", fill="both", expand=True)
+        content.pack(side=LEFT, fill="both", expand=True)
         inner = ttk.Frame(content, padding=(22, 14, 22, 10))
         inner.pack(fill="both", expand=True)
         inner.columnconfigure(0, weight=1)
         self.content = inner
 
-        self.page_title = self.skin(tk.Label(inner, font=self.fonts["title"], anchor="w"), "text@window")
+        self.page_title = self.skin(tk.Label(inner, font=self.fonts["title"], anchor=W), "text@window")
         self.page_title.grid(row=0, column=0, sticky="ew")
-        self.page_desc = self.skin(tk.Label(inner, font=self.fonts["body"], anchor="w", justify="left"), "muted@window")
+        self.page_desc = self.skin(tk.Label(inner, font=self.fonts["body"], anchor=W, justify=JUSTIFY, wraplength=900),
+                                   "muted@window")
         self.page_desc.grid(row=1, column=0, sticky="ew", pady=(2, 10))
 
         self._build_files_card(inner)                       # row 2
@@ -2019,13 +2809,13 @@ class PdfOcrApp(tk.Tk):
         self.files_card = outer
         head = ttk.Frame(card, style="Card.TFrame")
         head.pack(fill="x")
-        ttk.Label(head, text="Files", style="Card.Head.TLabel").pack(side="left")
+        ttk.Label(head, text=tr("Files"), style="Card.Head.TLabel").pack(side=LEFT)
         self.file_count = ttk.Label(head, text="", style="Card.Muted.TLabel")
-        self.file_count.pack(side="left", padx=8)
+        self.file_count.pack(side=LEFT, padx=8)
         for text, command in (("Clear", self.clear_files), ("Remove", self.remove_selected),
                               ("Add folder…", self.add_folder), ("Add files…", self.add_files)):
-            button = self.button(head, text, command)
-            button.pack(side="right", padx=(6, 0))
+            button = self.button(head, tr(text), command)
+            button.pack(side=RIGHT, padx=PX(6, 0))
         frame, self.file_tree = self.tree(card, [("name", "Name", 300, True), ("pages", "Pages", 70, False),
                                                  ("size", "Size", 90, False), ("folder", "Folder", 320, True)],
                                           height=4)
@@ -2033,49 +2823,58 @@ class PdfOcrApp(tk.Tk):
         foot = ttk.Frame(card, style="Card.TFrame")
         foot.pack(side="bottom", fill="x")  # packed before the list, so the list shrinks first
         frame.pack(fill="both", expand=True, pady=(8, 6))
-        ttk.Label(foot, text="Save results to:", style="Card.TLabel").pack(side="left")
+        ttk.Label(foot, text=tr("Save results to:"), style="Card.TLabel").pack(side=LEFT)
         self.output_label = ttk.Label(foot, text="", style="Card.Muted.TLabel")
-        self.output_label.pack(side="left", padx=8)
-        self.button(foot, "Same folder", self.reset_output).pack(side="right", padx=(6, 0))
-        self.button(foot, "Change…", self.choose_output).pack(side="right", padx=(6, 0))
-        ttk.Checkbutton(foot, text="Combine images into one document", variable=self.vars["combine_images"],
-                        style="Card.TCheckbutton").pack(side="right", padx=16)
+        self.output_label.pack(side=LEFT, padx=8)
+        self.button(foot, tr("Same folder"), self.reset_output).pack(side=RIGHT, padx=PX(6, 0))
+        self.button(foot, tr("Change…"), self.choose_output).pack(side=RIGHT, padx=PX(6, 0))
+        ttk.Checkbutton(foot, text=tr("Combine images into one document"), variable=self.vars["combine_images"],
+                        style="Card.TCheckbutton").pack(side=RIGHT, padx=16)
         self._update_output_label()
 
     def _common_row(self, parent, quality: bool = True, pages: bool = True) -> None:
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x", pady=(0, 6))
-        ttk.Label(row, text="Language", style="Card.TLabel").pack(side="left")
-        ttk.Combobox(row, textvariable=self.vars["language"], values=list(LANGUAGES), state="readonly",
-                     width=17).pack(side="left", padx=(6, 18))
+        ttk.Label(row, text=tr("Document language"), style="Card.TLabel").pack(side=LEFT)
+        self.choice(row, "language", list(LANGUAGES), 17).pack(side=LEFT, padx=PX(6, 18))
         if quality:
-            ttk.Label(row, text="Scan quality", style="Card.TLabel").pack(side="left")
-            ttk.Combobox(row, textvariable=self.vars["quality"], values=list(RESOLUTIONS), state="readonly",
-                         width=20).pack(side="left", padx=(6, 18))
+            ttk.Label(row, text=tr("Scan quality"), style="Card.TLabel").pack(side=LEFT)
+            self.choice(row, "quality", list(RESOLUTIONS), 20).pack(side=LEFT, padx=PX(6, 18))
         if pages:
-            ttk.Label(row, text="Pages", style="Card.TLabel").pack(side="left")
-            ttk.Entry(row, textvariable=self.pages_spec, width=12).pack(side="left", padx=(6, 6))
-            ttk.Label(row, text="blank = all, e.g. 1-5, 9", style="Card.Muted.TLabel").pack(side="left")
+            ttk.Label(row, text=tr("Pages"), style="Card.TLabel").pack(side=LEFT)
+            ttk.Entry(row, textvariable=self.pages_spec, width=12).pack(side=LEFT, padx=PX(6, 6))
+            ttk.Label(row, text=tr("blank = all, e.g. 1-5, 9"), style="Card.Muted.TLabel").pack(side=LEFT)
 
-    def _options_frame(self, key: str, title: str = "Options"):
+    def choice(self, parent, key: str, options: list[str], width: int):
+        """A read-only drop-down that shows translated names but stores the English key in self.vars[key]."""
+        shown = VisVar()
+        names = {vis(tr(option)): option for option in options}
+        current = self.vars[key].get()
+        shown.set(tr(current if current in options else options[0]))
+        box = ttk.Combobox(parent, textvariable=shown, values=[tr(o) for o in options], state="readonly",
+                           width=width, justify=JUSTIFY)
+        box.bind("<<ComboboxSelected>>", lambda _e: self.vars[key].set(names.get(shown.get(), options[0])))
+        return box
+
+    def _options_frame(self, key: str, title: str = "Options"):  # title is translated by card()
         outer, body = self.card(self.option_stack, title)
         outer.grid(row=0, column=0, sticky="nsew")
         self.page_frames[key] = outer
         return body
 
     def _check(self, parent, text: str, key: str, **pack):
-        widget = ttk.Checkbutton(parent, text=text, variable=self.vars[key], style="Card.TCheckbutton")
-        widget.pack(anchor="w", **pack)
+        widget = ttk.Checkbutton(parent, text=tr(text), variable=self.vars[key], style="Card.TCheckbutton")
+        widget.pack(anchor=W, **pack)
         return widget
 
     def _build_ocr_options(self) -> None:
         body = self._options_frame("ocr")
         self._common_row(body)
-        ttk.Checkbutton(body, text="Also read pages that already contain text", variable=self.force,
-                        style="Card.TCheckbutton").pack(anchor="w")
+        ttk.Checkbutton(body, text=tr("Also read pages that already contain text"), variable=self.force,
+                        style="Card.TCheckbutton").pack(anchor=W)
         self._check(body, "Turn sideways and upside-down pages upright", "fix_rotation")
-        ttk.Label(body, text="Output: <name>_ocr.pdf, the same pages with searchable text.",
-                  style="Card.Muted.TLabel").pack(anchor="w", pady=(6, 0))
+        ttk.Label(body, text=tr("Output: <name>_ocr.pdf, the same pages with searchable text."),
+                  style="Card.Muted.TLabel").pack(anchor=W, pady=(6, 0))
 
     def _build_markdown_options(self) -> None:
         body = self._options_frame("markdown")
@@ -2084,59 +2883,67 @@ class PdfOcrApp(tk.Tk):
         row.pack(fill="x")
         for text, key in (("Page markers", "markers"), ("Remove repeating headers and footers", "strip_headers"),
                           ("Also save the searchable PDF", "save_searchable")):
-            ttk.Checkbutton(row, text=text, variable=self.vars[key], style="Card.TCheckbutton").pack(
-                side="left", padx=(0, 18))
+            ttk.Checkbutton(row, text=tr(text), variable=self.vars[key], style="Card.TCheckbutton").pack(
+                side=LEFT, padx=PX(0, 18))
         arabic = ttk.Frame(body, style="Card.TFrame")
         arabic.pack(fill="x", pady=(6, 0))
-        ttk.Label(arabic, text="Arabic cleanup:", style="Card.TLabel", width=16).pack(side="left")
+        ttk.Label(arabic, text=tr("Arabic cleanup:"), style="Card.TLabel", width=16).pack(side=LEFT)
         for text, key in (("Digits to 0-9", "arabic_digits"), ("Remove tatweel", "arabic_tatweel"),
                           ("Remove diacritics", "arabic_diacritics"), ("Unify Alef forms", "arabic_alef")):
-            ttk.Checkbutton(arabic, text=text, variable=self.vars[key], style="Card.TCheckbutton").pack(
-                side="left", padx=(0, 18))
+            ttk.Checkbutton(arabic, text=tr(text), variable=self.vars[key], style="Card.TCheckbutton").pack(
+                side=LEFT, padx=PX(0, 18))
         sensitive = ttk.Frame(body, style="Card.TFrame")
         sensitive.pack(fill="x", pady=(8, 0))
-        sensitive.columnconfigure(2, weight=1)
-        sensitive.columnconfigure(4, weight=1)
-        ttk.Label(sensitive, text="Sensitive data:", style="Card.TLabel", width=16).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(sensitive, text="Hide in Markdown", variable=self.vars["redact"], style="Card.TCheckbutton",
-                        command=self._toggle_redaction).grid(row=0, column=1, columnspan=2, sticky="w")
-        self.redact_pdf_check = ttk.Checkbutton(sensitive, text="Also create a redacted PDF copy",
+        def col(column: int, span: int = 1) -> int:
+            return grid_col(column, span, 5)
+        sensitive.columnconfigure(col(2), weight=1)
+        sensitive.columnconfigure(col(4), weight=1)
+        ttk.Label(sensitive, text=tr("Sensitive data:"), style="Card.TLabel", width=16).grid(row=0, column=col(0),
+                                                                                          sticky=W)
+        ttk.Checkbutton(sensitive, text=tr("Hide in Markdown"), variable=self.vars["redact"], style="Card.TCheckbutton",
+                        command=self._toggle_redaction).grid(row=0, column=col(1, 2), columnspan=2, sticky=W)
+        self.redact_pdf_check = ttk.Checkbutton(sensitive, text=tr("Also create a redacted PDF copy"),
                                                 variable=self.vars["redact_pdf"], style="Card.TCheckbutton")
-        self.redact_pdf_check.grid(row=0, column=3, columnspan=2, sticky="w", padx=(12, 0))
-        ttk.Label(sensitive, text="Hide these words:", style="Card.TLabel").grid(row=1, column=1, sticky="w",
-                                                                                padx=(0, 6), pady=(4, 0))
-        self.redact_terms_entry = ttk.Entry(sensitive, textvariable=self.vars["redact_terms"], width=16)
-        self.redact_terms_entry.grid(row=1, column=2, sticky="ew", pady=(4, 0))
-        ttk.Label(sensitive, text="Hide the value after:", style="Card.TLabel").grid(row=1, column=3, sticky="w",
-                                                                                    padx=(12, 6), pady=(4, 0))
-        self.redact_labels_entry = ttk.Entry(sensitive, textvariable=self.vars["redact_labels"], width=16)
-        self.redact_labels_entry.grid(row=1, column=4, sticky="ew", pady=(4, 0))
-        ttk.Label(sensitive, style="Card.Muted.TLabel", wraplength=720, justify="left",
-                  text="Always hides ID/Iqama, IBAN, phone, email and card numbers. Separate entries with commas. "
-                       "Example: value after \"Ref, Dated\" hides the reference number and the date.")\
-            .grid(row=2, column=1, columnspan=4, sticky="w", pady=(2, 0))
+        self.redact_pdf_check.grid(row=0, column=col(3, 2), columnspan=2, sticky=W, padx=PX(12, 0))
+        ttk.Label(sensitive, text=tr("Hide these words:"), style="Card.TLabel").grid(row=1, column=col(1), sticky=W,
+                                                                                    padx=PX(0, 6), pady=(4, 0))
+        self.redact_terms_entry = ttk.Entry(sensitive, textvariable=self.vars["redact_terms"], width=16,
+                                            justify=JUSTIFY)
+        self.redact_terms_entry.grid(row=1, column=col(2), sticky="ew", pady=(4, 0))
+        ttk.Label(sensitive, text=tr("Hide the value after:"), style="Card.TLabel").grid(row=1, column=col(3), sticky=W,
+                                                                                        padx=PX(12, 6), pady=(4, 0))
+        self.redact_labels_entry = ttk.Entry(sensitive, textvariable=self.vars["redact_labels"], width=16,
+                                             justify=JUSTIFY)
+        self.redact_labels_entry.grid(row=1, column=col(4), sticky="ew", pady=(4, 0))
+        ttk.Label(sensitive, style="Card.Muted.TLabel", wraplength=720, justify=JUSTIFY,
+                  text=tr("Always hides ID/Iqama, IBAN, phone, email and card numbers. Separate entries with commas. "
+                          "Example: value after \"Ref, Dated\" hides the reference number and the date."))\
+            .grid(row=2, column=col(1, 4), columnspan=4, sticky=W, pady=(2, 0))
 
     def _build_reduce_options(self) -> None:
         body = self._options_frame("reduce", "Compression")
         for level, (description, _settings) in REDUCE_LEVELS.items():
             row = ttk.Frame(body, style="Card.TFrame")
             row.pack(fill="x", pady=1)
-            ttk.Radiobutton(row, text=level, value=level, variable=self.vars["reduce_level"],
-                            style="Card.TRadiobutton", width=11).pack(side="left")
-            ttk.Label(row, text=description, style="Card.Muted.TLabel").pack(side="left")
+            ttk.Radiobutton(row, text=tr(level), value=level, variable=self.vars["reduce_level"],
+                            style="Card.TRadiobutton", width=11).pack(side=LEFT)
+            ttk.Label(row, text=tr(description), style="Card.Muted.TLabel").pack(side=LEFT)
+        self._check(body, "At least 50% smaller: try stronger settings when needed (not with Lossless)",
+                    "reduce_target", pady=(6, 0))
         self._check(body, "Convert colour pages to grayscale (smaller; use for black-and-white documents)",
-                    "reduce_gray", pady=(6, 0))
-        ttk.Label(body, text="Output: <name>_small.pdf. Searchable text is kept. Your original file is never changed.",
-                  style="Card.Muted.TLabel").pack(anchor="w", pady=(6, 0))
+                    "reduce_gray")
+        ttk.Label(body, text=tr("Output: <name>_small.pdf. Searchable text is kept. Your original file is never changed."),
+                  style="Card.Muted.TLabel").pack(anchor=W, pady=(6, 0))
 
     def _build_tables_options(self) -> None:
         body = self._options_frame("tables")
         self._common_row(body, quality=False)
-        ttk.Label(body, style="Card.Muted.TLabel", wraplength=760, justify="left",
-                  text="Finds tables drawn with grid lines, in digital and scanned documents. Each table becomes a "
-                       "sheet in <name>_tables.xlsx, with amounts stored as numbers. Tables without lines are not "
-                       "detected. In scanned Arabic tables, check the numbers: Arabic-Indic digits are often misread.")\
-            .pack(anchor="w", pady=(4, 0))
+        ttk.Label(body, style="Card.Muted.TLabel", wraplength=760, justify=JUSTIFY,
+                  text=tr("Finds tables drawn with grid lines, in digital and scanned documents. Each table becomes a "
+                          "sheet in <name>_tables.xlsx, with amounts stored as numbers. Tables without lines are not "
+                          "detected. In scanned Arabic tables, check the numbers: Arabic-Indic digits are often "
+                          "misread."))\
+            .pack(anchor=W, pady=(4, 0))
 
     def _build_library_page(self) -> None:
         outer, body = self.card(self.option_stack)
@@ -2144,15 +2951,15 @@ class PdfOcrApp(tk.Tk):
         self.page_frames["library"] = outer
         bar = ttk.Frame(body, style="Card.TFrame")
         bar.pack(fill="x")
-        entry = ttk.Entry(bar, textvariable=self.search_text, font=self.fonts["body"])
-        entry.pack(side="left", fill="x", expand=True, ipady=2)
+        entry = ttk.Entry(bar, textvariable=self.search_text, font=self.fonts["body"], justify=JUSTIFY)
+        entry.pack(side=LEFT, fill="x", expand=True, ipady=2)
         entry.bind("<Return>", lambda _e: self.run_search())
         self.search_entry = entry
-        self.button(bar, "Search", self.run_search, primary=True).pack(side="left", padx=(8, 0))
-        self.button(bar, "Show all documents", self.show_all_documents).pack(side="left", padx=(6, 0))
-        ttk.Label(body, text="All words must appear on the same page. Use quotes for an exact phrase, e.g. "
-                             "\"chilled water\". Arabic letter forms and digits are matched either way.",
-                  style="Card.Muted.TLabel", wraplength=860, justify="left").pack(anchor="w", pady=(4, 6))
+        self.button(bar, tr("Search"), self.run_search, primary=True).pack(side=LEFT, padx=PX(8, 0))
+        self.button(bar, tr("Show all documents"), self.show_all_documents).pack(side=LEFT, padx=PX(6, 0))
+        ttk.Label(body, text=tr("All words must appear on the same page. Use quotes for an exact phrase, e.g. "
+                                "\"chilled water\". Arabic letter forms and digits are matched either way."),
+                  style="Card.Muted.TLabel", wraplength=860, justify=JUSTIFY).pack(anchor=W, pady=(4, 6))
         frame, self.library_tree = self.tree(body, [("doc", "Document", 240, False), ("page", "Page", 60, False),
                                                     ("text", "Text found", 460, True), ("folder", "Folder", 220, True)],
                                              height=10)
@@ -2161,18 +2968,18 @@ class PdfOcrApp(tk.Tk):
         self.library_rows: dict[str, dict] = {}
         actions = ttk.Frame(body, style="Card.TFrame")
         actions.pack(fill="x", pady=(8, 0))
-        self.button(actions, "Open document", self.open_library_selection, primary=True).pack(side="left")
+        self.button(actions, tr("Open document"), self.open_library_selection, primary=True).pack(side=LEFT)
         for text, command in (("Open folder", lambda: self.open_library_selection(folder=True)),
                               ("Add documents\u2026", self.add_library_documents),
                               ("Remove from library", self.remove_library_selection),
                               ("Remove missing files", self.remove_missing_documents)):
-            self.button(actions, text, command).pack(side="left", padx=(6, 0))
+            self.button(actions, tr(text), command).pack(side=LEFT, padx=PX(6, 0))
         foot = ttk.Frame(body, style="Card.TFrame")
         foot.pack(fill="x", pady=(8, 0))
         self.library_stats = ttk.Label(foot, text="", style="Card.Muted.TLabel")
-        self.library_stats.pack(side="left")
-        ttk.Checkbutton(foot, text="Add documents automatically after Make searchable and Convert to Markdown",
-                        variable=self.vars["library_auto"], style="Card.TCheckbutton").pack(side="right")
+        self.library_stats.pack(side=LEFT)
+        ttk.Checkbutton(foot, text=tr("Add documents automatically after Make searchable and Convert to Markdown"),
+                        variable=self.vars["library_auto"], style="Card.TCheckbutton").pack(side=RIGHT)
 
     def _build_settings_page(self) -> None:
         outer, body = self.card(self.option_stack, "Appearance")
@@ -2181,55 +2988,74 @@ class PdfOcrApp(tk.Tk):
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x")
         for text, value in (("Dark", "dark"), ("Light", "light")):
-            ttk.Radiobutton(row, text=text, value=value, variable=self.vars["theme"], style="Card.TRadiobutton",
-                            command=self._theme_from_setting).pack(side="left", padx=(0, 18))
-        ttk.Label(body, text="Updates", style="Card.Head.TLabel").pack(anchor="w", pady=(14, 4))
-        self._check(body, "Check for a newer version once a day (only the version number is requested)",
-                    "check_updates")
-        ttk.Label(body, text="Library", style="Card.Head.TLabel").pack(anchor="w", pady=(14, 4))
-        self._check(body, "Add documents to the library automatically after processing", "library_auto")
-        ttk.Label(body, text=f"Library file: {self.library.path}", style="Card.Muted.TLabel").pack(anchor="w", pady=(2, 0))
-        ttk.Label(body, text="Reset", style="Card.Head.TLabel").pack(anchor="w", pady=(14, 4))
+            ttk.Radiobutton(row, text=tr(text), value=value, variable=self.vars["theme"], style="Card.TRadiobutton",
+                            command=self._theme_from_setting).pack(side=LEFT, padx=PX(0, 18))
+        ttk.Label(body, text=tr("Interface language"), style="Card.Head.TLabel").pack(anchor=W, pady=(14, 4))
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x")
-        self.button(row, "Reset all settings", self.reset_settings).pack(side="left")
-        ttk.Label(row, text=f"   Settings file: {settings_path()}", style="Card.Muted.TLabel").pack(side="left")
+        for text, value in (("Automatic (as the computer)", "auto"), ("English", "en"), ("العربية", "ar")):
+            ttk.Radiobutton(row, text=tr(text), value=value, variable=self.vars["ui_language"],
+                            style="Card.TRadiobutton", command=self._language_from_setting).pack(side=LEFT, padx=PX(0, 18))
+        if WINDOWS:
+            row = ttk.Frame(body, style="Card.TFrame")
+            row.pack(fill="x", pady=(6, 0))
+            ttk.Label(row, text=tr("Arabic text display:"), style="Card.TLabel").pack(side=LEFT, padx=PX(0, 10))
+            for text, value in (("Method 1", "embed"), ("Method 2", "visual"), ("Method 3", "plain")):
+                ttk.Radiobutton(row, text=tr(text), value=value, variable=self.vars["arabic_display"],
+                                style="Card.TRadiobutton", command=self._language_from_setting).pack(
+                    side=LEFT, padx=PX(0, 14))
+            ttk.Label(body, text=tr("If Arabic words appear reversed or with separated letters, try another method."),
+                      style="Card.Muted.TLabel").pack(anchor=W, pady=(2, 0))
+        ttk.Label(body, text=tr("Updates"), style="Card.Head.TLabel").pack(anchor=W, pady=(14, 4))
+        self._check(body, "Check for a newer version once a day (only the version number is requested)",
+                    "check_updates")
+        ttk.Label(body, text=tr("Library"), style="Card.Head.TLabel").pack(anchor=W, pady=(14, 4))
+        self._check(body, "Add documents to the library automatically after processing", "library_auto")
+        ttk.Label(body, text=tr("Library file: {path}", path=self.library.path), style="Card.Muted.TLabel").pack(
+            anchor=W, pady=(2, 0))
+        ttk.Label(body, text=tr("Reset"), style="Card.Head.TLabel").pack(anchor=W, pady=(14, 4))
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x")
+        self.button(row, tr("Reset all settings"), self.reset_settings).pack(side=LEFT)
+        ttk.Label(row, text=tr("Settings file: {path}", path=settings_path()), style="Card.Muted.TLabel").pack(
+            side=LEFT, padx=PX(12, 0))
 
     def _build_about_page(self) -> None:
         outer, body = self.card(self.option_stack)
         outer.grid(row=0, column=0, sticky="nsew")
         self.page_frames["about"] = outer
         ttk.Label(body, text=f"{APP_NAME} {APP_VERSION}", style="Card.Head.TLabel",
-                  font=self.fonts["title"]).pack(anchor="w")
-        ttk.Label(body, text=APP_TAGLINE, style="Card.Muted.TLabel").pack(anchor="w", pady=(0, 10))
-        for line in (f"Created by {APP_CREDIT}.",
-                     "Free software under the GNU Affero General Public License v3.0 (AGPL-3.0), "
-                     "provided without any warranty.",
-                     "All processing runs on this computer. No document is uploaded anywhere."):
-            ttk.Label(body, text=line, style="Card.TLabel", wraplength=760, justify="left").pack(anchor="w", pady=1)
+                  font=self.fonts["title"]).pack(anchor=W)
+        ttk.Label(body, text=tr(APP_TAGLINE), style="Card.Muted.TLabel").pack(anchor=W, pady=(0, 10))
+        for line in (tr("Created by {credit}.", credit=APP_CREDIT),
+                     tr("Free software under the GNU Affero General Public License v3.0 (AGPL-3.0), "
+                        "provided without any warranty."),
+                     tr("All processing runs on this computer. No document is uploaded anywhere.")):
+            ttk.Label(body, text=line, style="Card.TLabel", wraplength=760, justify=JUSTIFY).pack(anchor=W, pady=1)
         row = ttk.Frame(body, style="Card.TFrame")
-        row.pack(anchor="w", pady=(14, 0))
-        self.button(row, "Report a bug or suggest an improvement", self.open_feedback, primary=True).pack(side="left")
-        self.button(row, "Check for updates now", lambda: self._maybe_check_updates(force=True)).pack(side="left", padx=8)
-        self.button(row, "Project page", lambda: open_external(f"https://github.com/{REPOSITORY}")).pack(side="left")
-        ttk.Label(body, text=f"Feedback is sent through your email app to {FEEDBACK_EMAIL}.",
-                  style="Card.Muted.TLabel").pack(anchor="w", pady=(8, 0))
+        row.pack(anchor=W, pady=(14, 0))
+        self.button(row, tr("Report a bug or suggest an improvement"), self.open_feedback, primary=True).pack(side=LEFT)
+        self.button(row, tr("Check for updates now"), lambda: self._maybe_check_updates(force=True)).pack(
+            side=LEFT, padx=8)
+        self.button(row, tr("Project page"), lambda: open_external(f"https://github.com/{REPOSITORY}")).pack(side=LEFT)
+        ttk.Label(body, text=tr("Feedback is sent through your email app to {email}.", email=FEEDBACK_EMAIL),
+                  style="Card.Muted.TLabel").pack(anchor=W, pady=(8, 0))
 
     def _build_action_bar(self, parent) -> None:
         bar = ttk.Frame(parent)
         self.action_bar = bar
         self.run_button = self.button(bar, "", self.run_current, primary=True)
-        self.run_button.pack(side="left")
-        self.stop_button = self.button(bar, "Stop", self.stop)
-        self.stop_button.pack(side="left", padx=8)
-        self.open_out_button = self.button(bar, "Open output folder", self.open_output)
-        self.open_out_button.pack(side="left")
+        self.run_button.pack(side=LEFT)
+        self.stop_button = self.button(bar, tr("Stop"), self.stop)
+        self.stop_button.pack(side=LEFT, padx=8)
+        self.open_out_button = self.button(bar, tr("Open output folder"), self.open_output)
+        self.open_out_button.pack(side=LEFT)
         # Progress shown next to the buttons while a tool runs (and the result when it ends)
         self.work_panel = ttk.Frame(bar)
-        self.work_panel.pack(side="left", fill="x", expand=True, padx=(16, 0))
+        self.work_panel.pack(side=LEFT, fill="x", expand=True, padx=PX(16, 0))
         self.work_bar = ttk.Progressbar(self.work_panel, mode="indeterminate", length=220,
                                         style="Work.Horizontal.TProgressbar")
-        self.work_label = self.skin(tk.Label(self.work_panel, text="", font=self.fonts["body"], anchor="w"),
+        self.work_label = self.skin(tk.Label(self.work_panel, text="", font=self.fonts["body"], anchor=W),
                                     "text@window")
         self.work_started = 0.0
         self.work_determinate = False
@@ -2242,9 +3068,9 @@ class PdfOcrApp(tk.Tk):
         self.results_card = outer
         head = ttk.Frame(card, style="Card.TFrame")
         head.pack(fill="x")
-        ttk.Label(head, text="Results", style="Card.Head.TLabel").pack(side="left")
-        ttk.Label(head, text="double-click to open", style="Card.Muted.TLabel").pack(side="left", padx=8)
-        self.button(head, "Clear", self.clear_results).pack(side="right")
+        ttk.Label(head, text=tr("Results"), style="Card.Head.TLabel").pack(side=LEFT)
+        ttk.Label(head, text=tr("double-click to open"), style="Card.Muted.TLabel").pack(side=LEFT, padx=8)
+        self.button(head, tr("Clear"), self.clear_results).pack(side=RIGHT)
         frame, self.result_tree = self.tree(card, [("tool", "Tool", 140, False), ("input", "File", 220, True),
                                                    ("output", "Saved as", 240, True), ("details", "Details", 300, True)],
                                             height=4)
@@ -2257,11 +3083,11 @@ class PdfOcrApp(tk.Tk):
         head = ttk.Frame(holder)
         head.pack(fill="x")
         self.log_toggle = self.skin(tk.Label(head, text="", font=self.fonts["small"], cursor="hand2"), "muted@window")
-        self.log_toggle.pack(side="left")
+        self.log_toggle.pack(side=LEFT)
         self.log_toggle.bind("<Button-1>", lambda _e: self._toggle_log())
-        self.feedback_link = self.skin(tk.Label(head, text="Report a problem", font=self.fonts["small"],
+        self.feedback_link = self.skin(tk.Label(head, text=tr("Report a problem"), font=self.fonts["small"],
                                                 cursor="hand2"), "accent@window")
-        self.feedback_link.pack(side="right")
+        self.feedback_link.pack(side=RIGHT)
         self.feedback_link.bind("<Button-1>", lambda _e: self.open_feedback())
         self.log = tk.Text(holder, height=5, state="disabled", wrap="word", font=self.fonts["mono"], bd=0,
                            padx=8, pady=6)
@@ -2273,7 +3099,8 @@ class PdfOcrApp(tk.Tk):
         self._show_log(self.vars["log_open"].get())
 
     def _show_log(self, visible: bool) -> None:
-        self.log_toggle.configure(text=("▾  Activity" if visible else "▸  Activity (hidden)"))
+        arrow = "▾" if visible else ("◂" if is_rtl() else "▸")
+        self.log_toggle.configure(text=arrow + "  " + (tr("Activity") if visible else tr("Activity (hidden)")))
         if visible:
             self.log.pack(fill="x", pady=(4, 0))
         else:
@@ -2302,8 +3129,8 @@ class PdfOcrApp(tk.Tk):
     def show_page(self, key: str) -> None:
         self.current_page = key
         page = next(p for p in PAGES if p[1] == key)
-        self.page_title.configure(text=page[3])
-        self.page_desc.configure(text=page[4])
+        self.page_title.configure(text=tr(page[3]))
+        self.page_desc.configure(text=tr(page[4]))
         is_tool = page[5]
         for name, frame in self.page_frames.items():
             if name == key:
@@ -2318,7 +3145,7 @@ class PdfOcrApp(tk.Tk):
             self.content.rowconfigure(2, weight=1, minsize=150)
             self.content.rowconfigure(3, weight=0)
             self.content.rowconfigure(5, weight=1, minsize=120)
-            self.run_button.configure(text="Working…" if self.work_started else "▶  " + RUN_LABELS[key])
+            self.run_button.configure(text=tr("Working…") if self.work_started else self._run_label(key))
             self._work_hide()
         else:
             for widget in (self.files_card, self.action_bar, self.results_card):
@@ -2349,8 +3176,54 @@ class PdfOcrApp(tk.Tk):
         self.palette = PALETTES[self.vars["theme"].get()]
         self.apply_theme()
 
+    # ------------------------------------------------------------ interface language
+    def _run_label(self, key: str) -> str:
+        return "▶  " + tr(RUN_LABELS[key])
+
+    def toggle_language(self) -> None:
+        self.vars["ui_language"].set("en" if is_rtl() else "ar")
+        self._language_from_setting()
+
+    def _language_from_setting(self) -> None:
+        choice = self.vars["ui_language"].get()
+        language = choice if choice in UI_LANGUAGES else system_ui_language()
+        mode = self.vars["arabic_display"].get()
+        if language == _ui["lang"] and mode == _ui["mode"]:
+            return
+        if self._busy():
+            messagebox.showinfo(tr("Interface language"), tr("The language can be changed when the current work "
+                                                             "finishes."), parent=self)
+            self.vars["ui_language"].set("ar" if is_rtl() else "en")
+            return
+        set_ui_language(language, mode)
+        self.rebuild_ui()
+        self._save_settings()
+
+    def rebuild_ui(self) -> None:
+        """Rebuild every widget in the current language and direction, keeping files, results and the log."""
+        log_text = self.log.get("1.0", "end-1c")
+        for child in self.winfo_children():
+            child.destroy()
+        self.skinned = []
+        self.work_started = 0.0
+        self._setup_fonts()
+        self._build()
+        self.apply_theme()
+        self.show_page(self.current_page)
+        self._sync_files()
+        self._toggle_redaction()
+        self._refresh_library_stats()
+        for result in reversed(self.results):
+            self._insert_result(result)
+        if log_text:
+            self._write_log(log_text)
+        self.status.set(tr("Ready"))
+        if self.current_page == "library" and self.search_text.get().strip():
+            self.run_search()
+
     def reset_settings(self) -> None:
-        if not messagebox.askyesno("Reset settings", "Restore all options to their default values?", parent=self):
+        if not messagebox.askyesno(tr("Reset settings"), tr("Restore all options to their default values?"),
+                                   parent=self):
             return
         for key, variable in self.vars.items():
             if key in DEFAULT_SETTINGS:
@@ -2359,9 +3232,9 @@ class PdfOcrApp(tk.Tk):
             settings_path().unlink()
         except OSError:
             pass
-        self._update_output_label()
-        self._toggle_redaction()
         self._theme_from_setting()
+        set_ui_language(system_ui_language(), DEFAULT_SETTINGS["arabic_display"])
+        self.rebuild_ui()
         self._write_log("Settings restored to defaults.")
 
     def _toggle_redaction(self) -> None:
@@ -2382,7 +3255,7 @@ class PdfOcrApp(tk.Tk):
             try:
                 size = human_size(path.stat().st_size)
             except OSError:
-                size = "missing"
+                size = tr("missing")
             pages = ""
             if path.suffix.lower() == ".pdf":
                 try:
@@ -2391,33 +3264,34 @@ class PdfOcrApp(tk.Tk):
                 except Exception:
                     pages = "?"
             elif is_office(path):
-                pages = OFFICE_KINDS[path.suffix.lower()]
+                pages = tr(OFFICE_KINDS[path.suffix.lower()])
             else:
-                pages = "image"
+                pages = tr("image")
             tree.insert("", "end", iid=str(index), values=(path.name, pages, size, str(path.parent)),
                         tags=("alt",) if index % 2 else ())
         count = len(self.files)
-        self.file_count.configure(text=f"{count} file{'s' if count != 1 else ''}" if count
-                                  else "PDFs, images, Word, Excel or PowerPoint files")
+        self.file_count.configure(text=(tr("1 file") if count == 1 else tr("{count} files", count=count)) if count
+                                  else tr("PDFs, images, Word, Excel or PowerPoint files"))
         self._refresh_buttons()
 
     def add_files(self) -> None:
         def patterns(suffixes) -> str:  # Linux file dialogs are case-sensitive
             return " ".join(f"*{suffix} *{suffix.upper()}" for suffix in suffixes)
-        selected = filedialog.askopenfilenames(parent=self, title="Select files", filetypes=[
-            ("All supported files", patterns(INPUT_SUFFIXES)), ("PDF files", patterns((".pdf",))),
-            ("Image files", patterns(IMAGE_SUFFIXES)),
-            ("Word, Excel and PowerPoint files", patterns(OFFICE_SUFFIXES)), ("All files", "*")])
+        selected = filedialog.askopenfilenames(parent=self, title=tr("Select files"), filetypes=[
+            (tr("All supported files"), patterns(INPUT_SUFFIXES)), (tr("PDF files"), patterns((".pdf",))),
+            (tr("Image files"), patterns(IMAGE_SUFFIXES)),
+            (tr("Word, Excel and PowerPoint files"), patterns(OFFICE_SUFFIXES)), (tr("All files"), "*")])
         self._add_files([Path(path) for path in selected])
 
     def add_folder(self) -> None:
-        folder = filedialog.askdirectory(parent=self, title="Select a folder of documents")
+        folder = filedialog.askdirectory(parent=self, title=tr("Select a folder of documents"))
         if folder:
             found = sorted(path for path in Path(folder).iterdir()
                            if path.is_file() and path.suffix.lower() in INPUT_SUFFIXES
                            and not path.stem.endswith(OUTPUT_STEMS))
             if not found:
-                messagebox.showinfo("No files found", "The selected folder contains no supported files.", parent=self)
+                messagebox.showinfo(tr("No files found"), tr("The selected folder contains no supported files."),
+                                    parent=self)
             self._add_files(found)
 
     def _add_files(self, paths: list[Path]) -> None:
@@ -2437,7 +3311,7 @@ class PdfOcrApp(tk.Tk):
         self._sync_files()
 
     def choose_output(self) -> None:
-        folder = filedialog.askdirectory(parent=self, title="Select the output folder")
+        folder = filedialog.askdirectory(parent=self, title=tr("Select the output folder"))
         if folder:
             self.vars["output_dir"].set(folder)
             self._update_output_label()
@@ -2451,7 +3325,7 @@ class PdfOcrApp(tk.Tk):
         if folder and not Path(folder).is_dir():
             self.vars["output_dir"].set("")
             folder = ""
-        self.output_label.configure(text=folder or "the same folder as each file")
+        self.output_label.configure(text=folder or tr("the same folder as each file"))
 
     def open_output(self) -> None:
         folder = self.vars["output_dir"].get()
@@ -2461,7 +3335,7 @@ class PdfOcrApp(tk.Tk):
         try:
             open_external(str(target))
         except Exception as exc:
-            messagebox.showerror("Cannot open folder", f"{target}\n\n{exc}", parent=self)
+            messagebox.showerror(tr("Cannot open folder"), f"{target}\n\n{exc}", parent=self)
 
     def open_feedback(self) -> None:
         FeedbackDialog(self)
@@ -2469,11 +3343,14 @@ class PdfOcrApp(tk.Tk):
     # ------------------------------------------------------------ results
     def _add_result(self, result: dict) -> None:
         self.results.insert(0, result)
-        tree = self.result_tree
+        self._insert_result(result)
+
+    def _insert_result(self, result: dict) -> None:
         iid = str(id(result))
         result["iid"] = iid
-        tree.insert("", 0, iid=iid, values=(result["tool"], result["input"], result.get("output_name", ""),
-                                             result.get("details", "")), tags=(result.get("tag", "ok"),))
+        self.result_tree.insert("", 0, iid=iid, values=(tr(result["tool"]), result["input"],
+                                                         result.get("output_name", ""), result.get("details", "")),
+                                tags=(result.get("tag", "ok"),))
 
     def clear_results(self) -> None:
         self.results.clear()
@@ -2486,7 +3363,7 @@ class PdfOcrApp(tk.Tk):
             try:
                 open_external(result["output"])
             except Exception as exc:
-                messagebox.showerror("Cannot open file", str(exc), parent=self)
+                messagebox.showerror(tr("Cannot open file"), str(exc), parent=self)
 
     # ------------------------------------------------------------ state and messages
     def _busy(self) -> bool:
@@ -2495,8 +3372,8 @@ class PdfOcrApp(tk.Tk):
     def _set_badge(self, state: str) -> None:
         self.status_badge_state = state
         p = self.palette
-        text, color = {"ready": ("● Ready", p["ok"]), "working": ("● Working", p["warn"]),
-                       "stopping": ("● Stopping", p["warn"])}[state]
+        text, color = {"ready": ("● " + tr("Ready"), p["ok"]), "working": ("● " + tr("Working"), p["warn"]),
+                       "stopping": ("● " + tr("Stopping"), p["warn"])}[state]
         self.status_badge.configure(text=text, fg=color, bg=p["topbar"])
 
     def _refresh_buttons(self) -> None:
@@ -2530,7 +3407,8 @@ class PdfOcrApp(tk.Tk):
                     self._write_log(value)
                 elif kind == "status":
                     self.status.set(value)
-                    self._work_file(value)
+                elif kind == "job":
+                    self._work_file(*value)
                 elif kind == "bar":
                     done, total = value
                     self.progress_bar.configure(maximum=max(total, 1), value=done)
@@ -2545,8 +3423,12 @@ class PdfOcrApp(tk.Tk):
                     self.last_update_check = value
                 elif kind == "update":
                     self._show_update(*value)
+                elif kind == "update_ready":
+                    self._install_update(value)
+                elif kind == "update_failed":
+                    self._update_failed(value)
                 elif kind == "no_update":
-                    messagebox.showinfo("Updates", value, parent=self)
+                    messagebox.showinfo(tr("Updates"), value, parent=self)
                 elif kind == "done":
                     if self.worker:
                         self.worker.join(timeout=2)
@@ -2561,11 +3443,11 @@ class PdfOcrApp(tk.Tk):
     def stop(self) -> None:
         self.cancel.set()
         self._set_badge("stopping")
-        self.status.set("Stopping after the current page…")
+        self.status.set(tr("Stopping after the current page…"))
 
     def _on_close(self) -> None:
-        if self._busy() and not messagebox.askyesno("Work in progress", "Processing is still running. Stop and close?",
-                                                    parent=self):
+        if self._busy() and not messagebox.askyesno(tr("Work in progress"),
+                                                    tr("Processing is still running. Stop and close?"), parent=self):
             return
         self.cancel.set()
         self._save_settings()
@@ -2583,7 +3465,7 @@ class PdfOcrApp(tk.Tk):
     # ------------------------------------------------------------ visible progress
     SPINNER = "◐◓◑◒"
 
-    def _work_begin(self, text: str = "Starting…") -> None:
+    def _work_begin(self, text: str = "") -> None:
         """Show the moving progress bar next to the buttons at once, before the first page is done."""
         import time
         if not self.work_started:
@@ -2591,23 +3473,22 @@ class PdfOcrApp(tk.Tk):
             self.work_file_label = ""
         self.work_determinate = False
         self.work_bar.configure(mode="indeterminate", value=0)
-        self.work_bar.pack(side="left")
-        self.work_label.pack(side="left", padx=(10, 0))
+        self.work_bar.pack(side=LEFT)
+        self.work_label.pack(side=LEFT, padx=PX(10, 0))
         self.work_bar.start(12)
-        self.run_button.configure(text="Working…")
+        self.run_button.configure(text=tr("Working…"))
         self.configure(cursor="watch")
-        self.work_label.configure(text=f"{self.SPINNER[0]}  {text}")
+        self.work_label.configure(text=f"{self.SPINNER[0]}  {text or tr('Starting…')}")
         self.update_idletasks()
         if not self.work_ticking:
             self.work_ticking = True
             self._work_tick()
 
-    def _work_file(self, status: str) -> None:
+    def _work_file(self, number: int, total: int) -> None:
         """Restart the moving bar when the next file begins, so it never shows 100% for unfinished work."""
-        match = re.match(r"File (\d+) of (\d+)", status)
-        if not match or not self.work_started:
+        if not self.work_started:
             return
-        label = match.group(0)
+        label = tr("File {number} of {total}", number=number, total=total) if total > 1 else ""
         if label != self.work_file_label:
             self.work_file_label = label
             if self.work_determinate:
@@ -2631,15 +3512,15 @@ class PdfOcrApp(tk.Tk):
             return
         elapsed = int(time.monotonic() - self.work_started)
         self.spinner_index = (self.spinner_index + 1) % len(self.SPINNER)
-        detail = "Working"
+        detail = tr("Working")
         if self.work_determinate:
             maximum = float(self.work_bar.cget("maximum")) or 1
             value = float(self.work_bar.cget('value'))
-            detail = "Saving" if value >= maximum else f"{int(100 * value / maximum)}%"
-        if self.work_file_label and not self.work_file_label.endswith(" of 1"):
+            detail = tr("Saving") if value >= maximum else f"{int(100 * value / maximum)}%"
+        if self.work_file_label:
             detail = f"{self.work_file_label} · {detail}"
         if self.status_badge_state == "stopping":
-            detail = "Stopping"
+            detail = tr("Stopping")
         self.work_label.configure(text=f"{self.SPINNER[self.spinner_index]}  {detail} · {elapsed // 60}:{elapsed % 60:02d}")
         self.after(250, self._work_tick)
 
@@ -2653,10 +3534,11 @@ class PdfOcrApp(tk.Tk):
         self.work_bar.configure(mode="determinate", maximum=1, value=1)
         self.configure(cursor="")
         stopped = self.cancel.is_set()
-        self.work_label.configure(text=("■  Stopped" if stopped else "✓  Finished") +
-                                  f" in {elapsed // 60}:{elapsed % 60:02d}")
-        self.run_button.configure(text="▶  " + RUN_LABELS[self.current_page]
-                                  if self.current_page in RUN_LABELS else self.run_button.cget("text"))
+        duration = f"{elapsed // 60}:{elapsed % 60:02d}"
+        self.work_label.configure(text=("■  " + tr("Stopped after {time}", time=duration)) if stopped
+                                  else ("✓  " + tr("Finished in {time}", time=duration)))
+        if self.current_page in RUN_LABELS:
+            self.run_button.configure(text=self._run_label(self.current_page))
 
     def _work_hide(self) -> None:
         if not self.work_started:
@@ -2671,32 +3553,96 @@ class PdfOcrApp(tk.Tk):
 
         def worker() -> None:
             try:
-                tag, url = fetch_latest_release()
+                info = fetch_latest_release_info()
+                tag, url = info["tag"], info["url"]
             except Exception:
                 if force:
-                    self.messages.put(("no_update", "Could not reach GitHub. Check your internet connection."))
+                    self.messages.put(("no_update", tr("Could not reach GitHub. Check your internet connection.")))
                 return  # offline or blocked: try again at the next start
             self.messages.put(("checked", time.time()))
             if tag and version_tuple(tag) > version_tuple(APP_VERSION):
-                self.messages.put(("update", (tag.lstrip("vV"), url)))
+                self.messages.put(("update", (tag.lstrip("vV"), url, update_asset(info["assets"]))))
             elif force:
-                self.messages.put(("no_update", f"You have the latest version ({APP_VERSION})."))
+                self.messages.put(("no_update", tr("You have the latest version ({version}).", version=APP_VERSION)))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _show_update(self, version: str, url: str) -> None:
+    def _show_update(self, version: str, url: str, asset: dict | None = None) -> None:
         for child in self.update_bar_holder.winfo_children():
             child.destroy()
         p = self.palette
         bar = tk.Frame(self.update_bar_holder, bg=p["accent"])
         bar.pack(fill="x")
-        tk.Label(bar, text=f"   GrepAll {version} is available.", bg=p["accent"], fg=p["on_accent"],
-                 font=self.fonts["bold"]).pack(side="left", pady=6)
-        tk.Button(bar, text="Download", command=lambda: open_external(url), relief="flat", bd=0, cursor="hand2",
-                  bg=p["on_accent"], fg=p["accent"], padx=12).pack(side="left", padx=10)
-        tk.Button(bar, text="Dismiss", command=bar.destroy, relief="flat", bd=0, cursor="hand2",
-                  bg=p["accent"], fg=p["on_accent"], activebackground=p["accent_hover"]).pack(side="right", padx=10)
+        tk.Label(bar, text=tr("A new version is available: GrepAll {version}", version=version), bg=p["accent"],
+                 fg=p["on_accent"], font=self.fonts["bold"]).pack(side=LEFT, pady=6, padx=PX(14, 0))
+        if asset:
+            tk.Button(bar, text=tr("Update now"), command=lambda: self.self_update(version, asset), relief="flat", bd=0,
+                      cursor="hand2", bg=p["on_accent"], fg=p["accent"], padx=12,
+                      font=self.fonts["bold"]).pack(side=LEFT, padx=PX(10, 0))
+            tk.Button(bar, text=tr("Release page"), command=lambda: open_external(url), relief="flat", bd=0,
+                      cursor="hand2", bg=p["accent"], fg=p["on_accent"], activebackground=p["accent_hover"],
+                      padx=12).pack(side=LEFT, padx=6)
+        else:
+            tk.Button(bar, text=tr("Download"), command=lambda: open_external(url), relief="flat", bd=0,
+                      cursor="hand2", bg=p["on_accent"], fg=p["accent"], padx=12).pack(side=LEFT, padx=10)
+        tk.Button(bar, text=tr("Dismiss"), command=bar.destroy, relief="flat", bd=0, cursor="hand2",
+                  bg=p["accent"], fg=p["on_accent"], activebackground=p["accent_hover"]).pack(side=RIGHT, padx=10)
         self._write_log(f"Update available: GrepAll {version} ({url})")
+
+    def self_update(self, version: str, asset: dict) -> None:
+        """Download the new version, check it, install it and restart GrepAll (after the user agrees)."""
+        if self._busy() or getattr(self, "updating", False):
+            messagebox.showinfo(tr("Update"), tr("The update can start when the current work finishes."), parent=self)
+            return
+        size = human_size(asset["size"]) if asset.get("size") else "?"
+        if not messagebox.askyesno(
+                tr("Update GrepAll"),
+                tr("Download GrepAll {version} ({size}) and install it now?", version=version, size=size) + "\n\n" +
+                tr("GrepAll closes during the installation. Your settings and library are kept."), parent=self):
+            return
+        self.updating = True
+        self._write_log(f"Downloading update: {asset['name']}")
+        self._work_begin(tr("Downloading update…"))
+        folder = Path(tempfile.mkdtemp(prefix="grepall-update-"))
+
+        def progress(done: int, total: int) -> None:
+            self.messages.put(("bar", (done, total or done)))
+            if total:
+                self.messages.put(("status", tr("Downloading update: {percent}%", percent=int(100 * done / total))))
+
+        def worker() -> None:
+            try:
+                package = download_update(asset, folder, progress)
+                self.messages.put(("update_ready", package))
+            except Exception as exc:
+                self.messages.put(("update_failed", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _install_update(self, package: Path) -> None:
+        try:
+            start_update_install(package)
+        except Exception as exc:
+            self._update_failed(str(exc))
+            return
+        self._write_log(f"Installing update from {package}")
+        self.status.set(tr("Installing the update…"))
+        self.update_idletasks()
+        self._save_settings()
+        self.after(300, self.destroy)
+
+    def _update_failed(self, error: str) -> None:
+        self.updating = False
+        self.work_started = 0.0
+        self.work_bar.stop()
+        self.configure(cursor="")
+        if self.current_page in RUN_LABELS:
+            self.run_button.configure(text=self._run_label(self.current_page))
+        self._work_hide()
+        self._write_log(f"Update failed: {error}")
+        self.status.set(tr("Ready"))
+        messagebox.showerror(tr("Update"), tr("The update could not be completed: {error}", error=error) + "\n\n" +
+                             tr("You can download it from the release page instead."), parent=self)
 
     # ------------------------------------------------------------ running tools
     def _plan_jobs(self, pdf_only: bool = False, office: bool = False) -> list[tuple[str, list[Path], Path]] | None:
@@ -2718,8 +3664,8 @@ class PdfOcrApp(tk.Tk):
         if combine:
             initial_dir = output_dir or str(images[0].parent)
             chosen = filedialog.asksaveasfilename(
-                parent=self, title="Name for the combined images", initialdir=initial_dir,
-                initialfile="combined_images.pdf", defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
+                parent=self, title=tr("Name for the combined images"), initialdir=initial_dir,
+                initialfile="combined_images.pdf", defaultextension=".pdf", filetypes=[(tr("PDF files"), "*.pdf")])
             if not chosen:
                 return None
             chosen_path = Path(chosen)
@@ -2730,7 +3676,7 @@ class PdfOcrApp(tk.Tk):
     def run_current(self) -> None:
         if self._busy() or not self.files:
             return
-        self._work_begin("Preparing…")
+        self._work_begin(tr("Preparing…"))
         try:
             self._run_current()
         finally:
@@ -2738,7 +3684,7 @@ class PdfOcrApp(tk.Tk):
                 self.work_started = 0.0
                 self.work_bar.stop()
                 self.configure(cursor="")
-                self.run_button.configure(text="▶  " + RUN_LABELS[self.current_page])
+                self.run_button.configure(text=self._run_label(self.current_page))
                 self.work_bar.pack_forget()
                 self.work_label.pack_forget()
 
@@ -2749,8 +3695,8 @@ class PdfOcrApp(tk.Tk):
         try:
             parse_pages(page_spec, 10**6)  # syntax check only
         except ValueError:
-            messagebox.showerror("Invalid page selection", "Enter pages as numbers or ranges, for example: 1-5, 9",
-                                 parent=self)
+            messagebox.showerror(tr("Invalid page selection"),
+                                 tr("Enter pages as numbers or ranges, for example: 1-5, 9"), parent=self)
             return
         tessdata = ""
         if tool != "reduce":
@@ -2758,7 +3704,7 @@ class PdfOcrApp(tk.Tk):
                 tessdata = find_tessdata()
                 check_languages(tessdata, language)
             except Exception as exc:
-                messagebox.showerror("OCR data not ready", str(exc), parent=self)
+                messagebox.showerror(tr("OCR data not ready"), str(exc), parent=self)
                 return
         jobs = self._plan_jobs(pdf_only=tool == "reduce", office=tool == "markdown")
         if not jobs:
@@ -2774,6 +3720,7 @@ class PdfOcrApp(tk.Tk):
             "markers": self.vars["markers"].get(), "strip_headers": self.vars["strip_headers"].get(),
             "save_searchable": self.vars["save_searchable"].get(), "cleanup": self._cleanup_options(),
             "reduce_level": self.vars["reduce_level"].get(), "reduce_gray": self.vars["reduce_gray"].get(),
+            "reduce_target": REDUCE_TARGET if self.vars["reduce_target"].get() else 0.0,
             "redaction": None,
         }
         if tool == "markdown" and self.vars["redact"].get():
@@ -2806,7 +3753,8 @@ class PdfOcrApp(tk.Tk):
 
         def progress(current: int, total: int, page_number: int, status: str) -> None:
             put(("bar", (current, total)))
-            put(("status", f"{job_text}: {label}, page {page_number} ({current} of {total})"))
+            put(("status", tr("{job}: {name}, page {page} ({current} of {total})", job=job_text, name=label,
+                              page=page_number, current=current, total=total)))
             if "upright" in status or "large page" in status:
                 put(("log", f"  Page {page_number}: {status}"))
             if self.cancel.is_set():
@@ -2832,53 +3780,73 @@ class PdfOcrApp(tk.Tk):
         for job_index, (title, inputs, out_dir) in enumerate(jobs, 1):
             if self.cancel.is_set():
                 break
-            label = inputs[0].name if len(inputs) == 1 else f"{len(inputs)} images ({title})"
-            job_text = f"File {job_index} of {len(jobs)}"
+            label = inputs[0].name if len(inputs) == 1 else tr("{count} images ({title})", count=len(inputs),
+                                                                    title=title)
+            job_text = tr("File {number} of {total}", number=job_index, total=len(jobs))
+            put(("job", (job_index, len(jobs))))
             put(("log", str(inputs[0]) if len(inputs) == 1 else f"{len(inputs)} images combined as {title}"))
             started = time.time()
             workdir = Path(tempfile.mkdtemp(prefix="grepall-"))
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 if tool == "reduce":
-                    put(("status", f"{job_text}: reducing {label}"))
+                    put(("status", tr("{job}: reducing {name}", job=job_text, name=label)))
                     put(("bar", (0, 1)))
                     output = out_dir / f"{title}_small.pdf"
-                    before, after, saved = reduce_pdf(inputs[0], output, options["reduce_level"], options["reduce_gray"])
+                    outcome = reduce_pdf(inputs[0], output, options["reduce_level"], options["reduce_gray"],
+                                         options["reduce_target"], cancel=self.cancel.is_set)
+                    if self.cancel.is_set() and not outcome["saved"]:
+                        raise Cancelled()
                     put(("bar", (1, 1)))
-                    if saved:
+                    before, after = outcome["before"], outcome["after"]
+                    reason = outcome["reason"]
+                    if outcome["saved"]:
                         change = min(99, round(100 * (1 - after / before)))
-                        change_text = f"{change}% smaller" if change >= 1 else "less than 1% smaller"
-                        details = f"{human_size(before)} \u2192 {human_size(after)}  ({change_text})"
+                        change_text = (tr("{percent}% smaller", percent=change) if change >= 1
+                                       else tr("less than 1% smaller"))
+                        details = ltr(f"{human_size(before)} \u2192 {human_size(after)}") + f"  ({change_text})"
+                        if outcome["step"]:
+                            details += tr("; ") + tr(outcome["step"])
+                        if not outcome["reached"]:
+                            details += tr("; ") + tr("not 50%: {reason}", reason=reason)
                         put(("log", f"  Saved {output.name}: {details}"))
                         put(("result", {"tool": "Reduce size", "input": label, "output": str(output),
-                                        "output_name": output.name, "details": details, "tag": "ok"}))
+                                        "output_name": output.name, "details": details,
+                                        "tag": "ok" if outcome["reached"] else "warn"}))
                     else:
-                        details = f"Already compact ({human_size(before)}); nothing saved"
+                        details = tr("Not saved: could not be made smaller ({size}); {reason}",
+                                     size=human_size(before), reason=reason)
                         put(("log", f"  {details}"))
                         put(("result", {"tool": "Reduce size", "input": label, "details": details, "tag": "warn"}))
+                    if outcome["signed"] and outcome["saved"]:
+                        note = tr("The original is digitally signed; the smaller copy's signature is no longer valid. "
+                                  "Keep the original for official use.")
+                        put(("log", f"  Note: {note}"))
+                        put(("result", {"tool": "Reduce size", "input": label, "details": note, "tag": "warn"}))
                     completed += 1
                     continue
 
                 if is_office(inputs[0]):
-                    put(("status", f"{job_text}: converting {label}"))
+                    put(("status", tr("{job}: converting {name}", job=job_text, name=label)))
                     put(("bar", (0, 1)))
                     md_path = out_dir / f"{title}.md"
                     redaction = options["redaction"]
                     texts, counts, details = office_to_markdown(inputs[0], md_path, title, options["cleanup"],
                                                                 redaction and redaction["terms"],
                                                                 redaction["labels"] if redaction else ())
+                    office_warn = getattr(details, "warn", False)
                     put(("bar", (1, 1)))
                     put(("log", f"  Saved {md_path.name}: {details}"))
                     if redaction is not None:
                         summary = ", ".join(f"{count} {name}" for name, count in sorted(counts.items()))
                         put(("log", f"  Hidden in Markdown: {summary or 'nothing found'}"))
-                        details += f"; hidden: {sum(counts.values())}"
+                        details += tr("; ") + tr("hidden: {count}", count=sum(counts.values()))
                         if redaction["pdf"] and not options.get("office_pdf_note"):
                             options["office_pdf_note"] = True
                             put(("log", "  Note: redacted PDF copies are made for PDFs and images only."))
                     put(("result", {"tool": "Markdown", "input": label, "output": str(md_path),
                                     "output_name": md_path.name, "details": details,
-                                    "tag": "warn" if "missing" in details else "ok"}))
+                                    "tag": "warn" if office_warn else "ok"}))
                     if options["library_auto"]:
                         self._library_add(inputs[0], texts)
                     completed += 1
@@ -2888,7 +3856,7 @@ class PdfOcrApp(tk.Tk):
                 if prepared is None:
                     continue
                 text_pdf, page_numbers, ocr_count, copied = prepared
-                read = f"{ocr_count} page(s) read with OCR, {copied} with existing text"
+                read = tr("{ocr} page(s) read with OCR, {copied} with existing text", ocr=ocr_count, copied=copied)
 
                 if tool == "ocr":
                     output = out_dir / f"{title}_ocr.pdf"
@@ -2913,13 +3881,14 @@ class PdfOcrApp(tk.Tk):
                     if redaction is not None:
                         summary = ", ".join(f"{count} {name}" for name, count in sorted(counts.items()))
                         put(("log", f"  Hidden in Markdown: {summary or 'nothing found'}"))
-                        details += f"; hidden: {sum(counts.values())}"
+                        details += tr("; ") + tr("hidden: {count}", count=sum(counts.values()))
                         if redaction["pdf"]:
                             redacted = out_dir / f"{title}_redacted.pdf"
                             areas = redact_pdf(text_pdf, redacted, redaction["terms"], redaction["labels"])
                             put(("log", f"  Saved {redacted.name}: {areas} area(s) blacked out"))
                             put(("result", {"tool": "Redacted copy", "input": label, "output": str(redacted),
-                                            "output_name": redacted.name, "details": f"{areas} area(s) blacked out",
+                                            "output_name": redacted.name,
+                                            "details": tr("{count} area(s) blacked out", count=areas),
                                             "tag": "ok"}))
                     searchable = None
                     if options["save_searchable"]:
@@ -2936,7 +3905,8 @@ class PdfOcrApp(tk.Tk):
                 elif tool == "tables":
                     def progress(current: int, total: int, page_number: int, status: str) -> None:
                         put(("bar", (current, total)))
-                        put(("status", f"{job_text}: finding tables in {label}, page {current} of {total}"))
+                        put(("status", tr("{job}: finding tables in {name}, page {current} of {total}", job=job_text,
+                                          name=label, current=current, total=total)))
                         if self.cancel.is_set():
                             raise Cancelled()
                     with pymupdf.open(text_pdf) as probe:
@@ -2948,28 +3918,30 @@ class PdfOcrApp(tk.Tk):
                         output = out_dir / f"{title}_tables.xlsx"
                         write_tables_xlsx(tables, output, title)
                         pages_with = len({t["page"] for t in tables})
-                        details = f"{len(tables)} table(s) on {pages_with} page(s)"
+                        details = tr("{tables} table(s) on {pages} page(s)", tables=len(tables), pages=pages_with)
                         put(("log", f"  Saved {output.name}: {details}"))
                         put(("result", {"tool": "Tables to Excel", "input": label, "output": str(output),
                                         "output_name": output.name, "details": details, "tag": "ok"}))
                     else:
                         put(("log", "  No ruled tables found (tables need visible grid lines)."))
                         put(("result", {"tool": "Tables to Excel", "input": label,
-                                        "details": "No ruled tables found", "tag": "warn"}))
+                                        "details": tr("No ruled tables found"), "tag": "warn"}))
                 completed += 1
             except Cancelled:
                 put(("log", "  Stopped. This file was not saved."))
                 break
             except Exception as exc:
                 put(("log", f"  Failed: {exc}"))
-                put(("result", {"tool": RUN_LABELS[tool], "input": label, "details": f"Failed: {exc}", "tag": "fail"}))
+                put(("result", {"tool": RUN_LABELS[tool], "input": label, "details": tr("Failed: {error}", error=exc),
+                                "tag": "fail"}))
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
         if options["redaction"] is not None and completed:
             put(("log", f"  Note: {REDACTION_NOTE}"))
-        result = (f"Stopped. {completed} file(s) done." if self.cancel.is_set()
-                  else f"{RUN_LABELS[tool]} finished: {completed} of {len(jobs)} file(s).")
-        put(("log", result))
+        result = (tr("Stopped. {done} file(s) done.", done=completed) if self.cancel.is_set()
+                  else tr("{tool} finished: {done} of {total} file(s).", tool=tr(RUN_LABELS[tool]), done=completed,
+                          total=len(jobs)))
+        put(("log", f"Finished: {completed} of {len(jobs)} file(s)."))
         put(("done", result))
 
     # ------------------------------------------------------------ library
@@ -2978,7 +3950,8 @@ class PdfOcrApp(tk.Tk):
             documents, pages = self.library.stats()
         except Exception:
             documents = pages = 0
-        self.library_stats.configure(text=f"{documents} document(s), {pages} page(s) in the library")
+        self.library_stats.configure(text=tr("{documents} document(s), {pages} page(s) in the library",
+                                             documents=documents, pages=pages))
 
     def run_search(self) -> None:
         query = self.search_text.get().strip()
@@ -2987,7 +3960,7 @@ class PdfOcrApp(tk.Tk):
         try:
             results = self.library.search(query)
         except Exception as exc:
-            messagebox.showerror("Search failed", str(exc), parent=self)
+            messagebox.showerror(tr("Search failed"), str(exc), parent=self)
             return
         self._show_search_results(results, query)
 
@@ -2995,8 +3968,8 @@ class PdfOcrApp(tk.Tk):
         tree = self.library_tree
         tree.delete(*tree.get_children())
         self.library_rows = {}
-        tree.heading("page", text="Page")
-        tree.heading("text", text="Text found")
+        tree.heading("page", text=tr("Page"))
+        tree.heading("text", text=tr("Text found"))
         for index, row in enumerate(results):
             iid = f"r{index}"
             self.library_rows[iid] = row
@@ -3004,23 +3977,24 @@ class PdfOcrApp(tk.Tk):
             if not row["exists"]:
                 tags.append("missing")
             tree.insert("", "end", iid=iid, tags=tuple(tags), values=(
-                row["title"] + ("" if row["exists"] else "  (missing)"), self._page_label(row), row["snippet"],
+                row["title"] + ("" if row["exists"] else "  " + tr("(missing)")), self._page_label(row), row["snippet"],
                 str(Path(row["path"]).parent)))
         found = len(results)
-        self.status.set(f"{found} page(s) found for “{query}”" + (" (first 500 shown)" if found >= 500 else ""))
+        self.status.set(tr("{count} page(s) found for “{query}”", count=found, query=query)
+                        + (" " + tr("(first 500 shown)") if found >= 500 else ""))
 
     @staticmethod
     def _page_label(row: dict) -> str:
         kind = OFFICE_KINDS.get(Path(row["path"]).suffix.lower())
-        return {"Excel": f"Sheet {row['page']}", "PowerPoint": f"Slide {row['page']}", "Word": "—"}.get(kind,
-                                                                                                    str(row["page"]))
+        return {"Excel": tr("Sheet {number}", number=row["page"]), "PowerPoint": tr("Slide {number}", number=row["page"]),
+                "Word": "—"}.get(kind, str(row["page"]))
 
     def show_all_documents(self) -> None:
         tree = self.library_tree
         tree.delete(*tree.get_children())
         self.library_rows = {}
-        tree.heading("page", text="Pages")
-        tree.heading("text", text="Added")
+        tree.heading("page", text=tr("Pages"))
+        tree.heading("text", text=tr("Added"))
         for index, doc in enumerate(self.library.documents()):
             iid = f"d{index}"
             self.library_rows[iid] = {**doc, "page": 1, "doc_id": doc["id"]}
@@ -3028,7 +4002,7 @@ class PdfOcrApp(tk.Tk):
             if not doc["exists"]:
                 tags.append("missing")
             tree.insert("", "end", iid=iid, tags=tuple(tags), values=(
-                doc["title"] + ("" if doc["exists"] else "  (missing)"), doc["pages"],
+                doc["title"] + ("" if doc["exists"] else "  " + tr("(missing)")), doc["pages"],
                 time.strftime("%Y-%m-%d %H:%M", time.localtime(doc["added"])), str(Path(doc["path"]).parent)))
         self._refresh_library_stats()
 
@@ -3042,21 +4016,22 @@ class PdfOcrApp(tk.Tk):
         path = Path(row["path"])
         target = path.parent if folder else path
         if not target.exists():
-            messagebox.showwarning("File not found", f"{path}\n\nThe file was moved or deleted. Use "
-                                   "\"Remove missing files\" to clean up the library.", parent=self)
+            messagebox.showwarning(tr("File not found"), f"{path}\n\n" + tr(
+                "The file was moved or deleted. Use \"Remove missing files\" to clean up the library."), parent=self)
             return
         try:
             open_external(str(target))
             if not folder:
-                self.status.set(f"Opened {path.name}. The text was found on page {row['page']}.")
+                self.status.set(tr("Opened {name}. The text was found on page {page}.", name=path.name,
+                                   page=self._page_label(row)))
         except Exception as exc:
-            messagebox.showerror("Cannot open", str(exc), parent=self)
+            messagebox.showerror(tr("Cannot open"), str(exc), parent=self)
 
     def remove_library_selection(self) -> None:
         ids = sorted({self.library_rows[i]["doc_id"] for i in self.library_tree.selection() if i in self.library_rows})
         if not ids or not messagebox.askyesno(
-                "Remove from library", f"Remove {len(ids)} document(s) from the library?\n\n"
-                                       "The files themselves are not deleted.", parent=self):
+                tr("Remove from library"), tr("Remove {count} document(s) from the library?\n\n"
+                                              "The files themselves are not deleted.", count=len(ids)), parent=self):
             return
         self.library.remove(ids)
         self.library_tree.delete(*self.library_tree.get_children())
@@ -3067,15 +4042,16 @@ class PdfOcrApp(tk.Tk):
         removed = self.library.remove_missing()
         self._refresh_library_stats()
         self.library_tree.delete(*self.library_tree.get_children())
-        messagebox.showinfo("Library", f"{removed} missing document(s) removed from the library.", parent=self)
+        messagebox.showinfo(tr("Library"), tr("{count} missing document(s) removed from the library.", count=removed),
+                            parent=self)
 
     def add_library_documents(self) -> None:
         if self._busy():
             return
         def patterns(suffixes) -> str:
             return " ".join(f"*{suffix} *{suffix.upper()}" for suffix in suffixes)
-        selected = filedialog.askopenfilenames(parent=self, title="Add documents to the library", filetypes=[
-            ("All supported files", patterns(INPUT_SUFFIXES)), ("All files", "*")])
+        selected = filedialog.askopenfilenames(parent=self, title=tr("Add documents to the library"), filetypes=[
+            (tr("All supported files"), patterns(INPUT_SUFFIXES)), (tr("All files"), "*")])
         paths = [Path(p) for p in selected if Path(p).suffix.lower() in INPUT_SUFFIXES]
         if not paths:
             return
@@ -3084,7 +4060,7 @@ class PdfOcrApp(tk.Tk):
             tessdata = find_tessdata()
             check_languages(tessdata, language)
         except Exception as exc:
-            messagebox.showerror("OCR data not ready", str(exc), parent=self)
+            messagebox.showerror(tr("OCR data not ready"), str(exc), parent=self)
             return
         options = {"tool": "library", "language": language, "tessdata": tessdata, "page_spec": None,
                    "dpi": RESOLUTIONS[self.vars["quality"].get()], "force": False,
@@ -3101,11 +4077,13 @@ class PdfOcrApp(tk.Tk):
             workdir = Path(tempfile.mkdtemp(prefix="grepall-"))
             try:
                 if is_office(path):
-                    put(("status", f"Document {index} of {len(paths)}: reading {path.name}"))
+                    put(("status", tr("Document {number} of {total}: reading {name}", number=index, total=len(paths),
+                                      name=path.name)))
                     self._library_add(path, office_texts(path))
                     added += 1
                     continue
-                prepared = self._prepare_text_pdf([path], workdir, options, path.name, f"Document {index} of {len(paths)}")
+                prepared = self._prepare_text_pdf([path], workdir, options, path.name,
+                                                  tr("Document {number} of {total}", number=index, total=len(paths)))
                 if prepared:
                     self._library_add(path, page_texts(prepared[0]))
                     added += 1
@@ -3115,8 +4093,8 @@ class PdfOcrApp(tk.Tk):
                 put(("log", f"  {path.name}: failed ({exc})"))
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
-        result = f"Library: {added} of {len(paths)} document(s) added."
-        put(("log", result))
+        result = tr("Library: {added} of {total} document(s) added.", added=added, total=len(paths))
+        put(("log", f"Library: {added} of {len(paths)} document(s) added."))
         put(("library_changed", None))
         put(("done", result))
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.7.0 (2026-11-11)
+
+### Added
+- **Arabic interface:** The whole app in Arabic with a mirrored, right-to-left layout. Switch with the button at the top right or under Settings. On first start, GrepAll follows the computer's display language. Arabic file names and text now display correctly on Linux too.
+- **Reduce file size: "At least 50% smaller"** (on by default): stronger settings are tried automatically until the file is half its size, keeping scans readable. When 50% is not possible, the Results table explains why (drawings, fonts, attached files, or already-compressed images).
+- Black-and-white scans (for example, signed contracts) are now compressed in the compact fax format (CCITT Group 4). Previously they were left unchanged, which is why such files shrank by only a few KB.
+- A note in the Results table when the original PDF is digitally signed.
+- **Update from within the app:** "Update now" in the update notice downloads the new version, checks it against the checksum published on GitHub, installs it, and restarts GrepAll (Windows installer and Linux package). Settings and the library are kept.
+
+### Changed
+- Results and status messages appear in the selected interface language. The Activity log stays in English, so problem reports remain readable.
+
 ## 1.6.0 (2026-10-28)
 
 ### Added

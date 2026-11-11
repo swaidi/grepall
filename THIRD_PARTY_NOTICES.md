@@ -32,6 +32,8 @@ The distributed GrepAll app (`GrepAll.exe` on Windows, `GrepAll` on Linux) bundl
 | et_xmlfile | MIT License |
 | [python-docx](https://github.com/python-openxml/python-docx) | MIT License (reads Word files) |
 | [python-pptx](https://github.com/scanny/python-pptx) | MIT License (reads PowerPoint files) |
+| [arabic-reshaper](https://github.com/mpcabd/python-arabic-reshaper) | MIT License (Arabic interface: joins letters) |
+| [python-bidi](https://github.com/MeirKriheli/python-bidi) | GNU Lesser General Public License v3.0 (Arabic interface: right-to-left order) |
 | [lxml](https://lxml.de/) (includes libxml2 and libxslt) | BSD 3-Clause (libxml2 and libxslt: MIT License) |
 | Pillow | MIT-CMU License |
 | XlsxWriter | BSD 2-Clause |

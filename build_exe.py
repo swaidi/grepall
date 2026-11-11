@@ -62,7 +62,8 @@ def check_packages() -> None:
     step("Checking packages")
     missing = []
     packages = {"pymupdf": "pymupdf", "pymupdf4llm": "pymupdf4llm", "openpyxl": "openpyxl", "numpy": "numpy",
-                "docx": "python-docx", "pptx": "python-pptx", "PyInstaller": "pyinstaller", "PIL": "pillow"}
+                "docx": "python-docx", "pptx": "python-pptx", "arabic_reshaper": "arabic-reshaper",
+                "bidi": "python-bidi", "PyInstaller": "pyinstaller", "PIL": "pillow"}
     for module, package in packages.items():
         try:
             __import__(module)
@@ -108,6 +109,8 @@ def build() -> None:
         "--collect-all", "onnxruntime",
         "--collect-data", "docx",   # Word reading (templates and XML schemas)
         "--collect-data", "pptx",   # PowerPoint reading
+        "--hidden-import", "arabic_reshaper",   # Arabic interface: joins Arabic letters (Linux)
+        "--hidden-import", "bidi.algorithm",    # Arabic interface: right-to-left order (Linux)
     ]
     try:
         __import__("pymupdf_layout")

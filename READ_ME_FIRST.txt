@@ -133,8 +133,16 @@ REDUCE FILE SIZE
   - Smallest: images at 150 dpi, stronger compression (e.g. for email).
   - "Convert colour pages to grayscale" saves more for black-and-white
     documents.
+  - "At least 50% smaller" (on by default): if the chosen level saves
+    less than half, stronger settings are tried automatically. Scans stay
+    readable: colour pages never go below 120 dpi, black-and-white scans
+    never below 200 dpi. Black-and-white scans (such as signed contracts)
+    are stored in the compact fax format.
+  If 50% is not possible, the Results table says why. The usual reason
+  is a file made of drawings (CAD exports) or text, not scanned images.
   If a file cannot be made smaller, nothing is saved and the Results
-  table says so.
+  table says so. A digitally signed PDF loses its signature in the
+  smaller copy; keep the original for official use.
 
 TABLES TO EXCEL
   Output: <name>_tables.xlsx, one sheet per table, with amounts stored as
@@ -154,9 +162,19 @@ SEARCH DOCUMENTS (LIBRARY)
   "Remove missing files" cleans up documents that were moved or deleted.
 
 SETTINGS
-  Dark or light appearance (also the button at the top right), update
-  check, and library options. Your options are remembered for the next
-  start. "Reset all settings" restores the defaults.
+  Dark or light appearance (also the button at the top right), interface
+  language, update check, and library options. Your options are
+  remembered for the next start. "Reset all settings" restores the
+  defaults.
+
+ARABIC INTERFACE / الواجهة العربية
+  Select "العربية" at the top right to show the whole app in Arabic, from
+  right to left. Select "English" to switch back. On first start, GrepAll
+  uses the computer's display language. You can also choose the language
+  under Settings.
+  On Windows: if Arabic text appears reversed or with separated letters,
+  choose another "Arabic text display" method under Settings.
+  للتبديل إلى الواجهة العربية اختر "العربية" أعلى النافذة.
 
 
 TIPS
@@ -174,7 +192,10 @@ UPDATES
 Once a day, GrepAll asks GitHub for the latest version number. If a newer
 version exists, a bar with a "Download" button appears at the top of the
 window. Only the version number is requested; no document, file name or
-personal information is sent. Turn this off under Settings. Without an internet connection, the check is simply skipped.
+personal information is sent. Turn this off under Settings.
+Select "Update now" in the notice to download and install the new version
+automatically; GrepAll closes, installs the update, and starts again.
+Your settings and library are kept. Without an internet connection, the check is simply skipped.
 
 
 FEEDBACK
